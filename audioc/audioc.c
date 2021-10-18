@@ -28,6 +28,8 @@ int main(int argc, char** argv)
     u32 bufferingTime; //in ms
     bool verbose;
     u8 payload;
+
+    LOG("DEBUG: test!\n");
     
     if (args_capture_audioc(argc, argv, &multicastIp, &ssrc,
             &port, &vol, &packetDuration, &verbose, &payload, &bufferingTime) == EXIT_FAILURE)
@@ -35,6 +37,10 @@ int main(int argc, char** argv)
         exit(1);  /* there was an error parsing the arguments, error info
                    is printed by the args_capture function */
     };
+
+    /*
+    *   Signal handler configuration
+    */
 
     struct sigaction sigInfo = {
         .sa_handler = signalHandler,
@@ -47,5 +53,42 @@ int main(int argc, char** argv)
         exit(1);
     }
 
+    /*
+    *   Sound card configuration
+    */
+    int channelNumber = 1; //Only support mono
+    int rate = 8000;
+    int sndCardFmt;
+    switch (payload)
+    {
+    case PCMU:
+        sndCardFmt = AFMT_MU_LAW;
+        break;
+    case L16_1:
+        sndCardFmt = AFMT_S16_BE;
+        break;
+    default:
+        printf("WARNING: No payload selected, using Mu-law by default.");
+        sndCardFmt = AFMT_MU_LAW;
+        break;
+    }
+
+    int requestedFragmentSize = 0;
+    int sndCardFD = -1;
+    //duplex mode is activated
+    configSndcard(&sndCardFD, &sndCardFmt, &channelNumber, &rate, &requestedFragmentSize, true);
+    vol = configVol(channelNumber, sndCardFD, vol);
+
+    /*
+    *   Circular buffer
+    */
+    int numberOfBlocks = 16; /* FILL */
+    void* circularBuffer = cbuf_create_buffer(numberOfBlocks, requestedFragmentSize);
+
+
+    /*
+    *   Cleanup
+    */
+    cbuf_destroy_buffer(circularBuffer);
     return 0;
 }
