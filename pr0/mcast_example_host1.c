@@ -81,7 +81,8 @@ int main(void) {
 
 
     /* we do not need to fill in the 'remToRecv' variable, but this structure appears with the address and port of the remote node from which the packet was received. 
-       However, we need to provide in advance the maximum amount of memory which recvfrom can use starting from the 'remToRecv' pointer - to allow recvfrom to be sure that it does not exceed the available space. To do so, we need to provide the size of the 'remToRecv' variable */
+       However, we need to provide in advance the maximum amount of memory which recvfrom can use starting from the 'remToRecv' pointer -
+       to allow recvfrom to be sure that it does not exceed the available space. To do so, we need to provide the size of the 'remToRecv' variable */
     sockAddrInLength = sizeof (struct sockaddr_in); 
 
     /* receives from any who wishes to send to host1 in this port */  

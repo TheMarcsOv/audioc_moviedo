@@ -33,23 +33,25 @@ int main ()
     memset(mem, 0, 50); /* Set memory with zeros */
 
     printf("value1: %d, value2: %d\n", value1, value2[0]);
-    memcpy (&mem2, mem, 50*sizeof(int));    
+    memcpy (mem2, mem, 50*sizeof(int));    
     printf("value1: %d, value2: %d\n", value1, value2[0]);
                 
     free(mem);
     free(mem2);
 
     // PART 2
-    int *a;
+    int a;
     int array[3]; 
     char *b;
 
 
-    // *a = 3;         
-    //array[3] = 4;   
+    a = 3;         
+    array[2] = 4;   
 
     b = malloc(2);
-    *(b+2)='5';    
+    *(b+1)='5';    
+
+    free(b);
 
     return(0);
 }

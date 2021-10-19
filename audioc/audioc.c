@@ -84,6 +84,45 @@ int main(int argc, char** argv)
     */
     int numberOfBlocks = 16; /* FILL */
     void* circularBuffer = cbuf_create_buffer(numberOfBlocks, requestedFragmentSize);
+    
+    /*
+    *   Multicast socket configuration
+    */
+    struct sockaddr_in sendAddr = {
+        .sin_family = AF_INET,
+        .sin_port = htons(port),
+        .sin_addr = multicastIp,
+    };
+
+    int socketDesc;
+    if ((socketDesc = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
+    {
+        printf("Socket could not be openned!\n");
+        exit(EXIT_FAILURE);
+    }
+
+    int enable = 1;
+    if (setsockopt(socketDesc, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0) {
+        printf("setsockopt(SO_REUSEADDR) failed!\n");
+        exit(EXIT_FAILURE);
+    }
+
+    if (bind(socketDesc, (struct sockaddr *)&sendAddr, sizeof(struct sockaddr_in)) < 0) {
+        printf("Socket bind error!\n");
+        exit(EXIT_FAILURE);
+    }
+
+    //Join multicast group
+    struct ip_mreq mcRequest; 
+    mcRequest.imr_multiaddr = multicastIp;
+    mcRequest.imr_interface.s_addr = htonl(INADDR_ANY);
+    if (setsockopt(socketDesc, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mcRequest, sizeof(struct ip_mreq)) < 0) {
+        printf("setsockopt error");
+        exit(EXIT_FAILURE);
+    }
+
+    u8 loopback = 0;
+    setsockopt(socketDesc, IPPROTO_IP, IP_MULTICAST_LOOP, &loopback, sizeof(u8));
 
 
     /*
