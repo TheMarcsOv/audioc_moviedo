@@ -12,10 +12,19 @@
 #include "../lib/configureSndcard.h"
 #include "../lib/rtp.h"
 
-void signalHandler(int sigNum)
+typedef enum payload payload_t;
+typedef struct {
+    u32 ssrc;
+    u8 pt;
+} session_params_t;
+
+static void signalHandler(int sigNum)
 {
 	(void) sigNum;
 }
+
+static void execSender();
+static void execReceiver();
 
 int main(int argc, char** argv)
 {
@@ -34,6 +43,11 @@ int main(int argc, char** argv)
     { 
         exit(1);  /* there was an error parsing the arguments, error info
                    is printed by the args_capture function */
+    };
+
+    session_params_t sessionParams = {
+        .ssrc = ssrc,
+        .pt = payload,
     };
 
     if (verbose) DEBUG_TRACES_ENABLED = true;
@@ -62,31 +76,28 @@ int main(int argc, char** argv)
     *   Sound card configuration
     */
     int requestedFragmentSize = 128;
-    //HACK
-    if (ssrc % 2 == 0) {
-        int channelNumber = 1; //Only support mono
-        int rate = 8000;
-        int sndCardFmt;
-        switch (payload)
-        {
-        case PCMU:
-            sndCardFmt = AFMT_MU_LAW;
-            break;
-        case L16_1:
-            sndCardFmt = AFMT_S16_BE;
-            break;
-        default:
-            fprintf(stderr, "WARNING: No payload selected, using Mu-law by default.");
-            sndCardFmt = AFMT_MU_LAW;
-            break;
-        }
-
-        
-        int sndCardFD = -1;
-        //duplex mode is activated
-        configSndcard(&sndCardFD, &sndCardFmt, &channelNumber, &rate, &requestedFragmentSize, true);
-        vol = configVol(channelNumber, sndCardFD, vol);
+    int channelNumber = 1; //Only support mono
+    int rate = 8000;
+    int sndCardFmt;
+    switch (payload)
+    {
+    case PCMU:
+        sndCardFmt = AFMT_MU_LAW;
+        break;
+    case L16_1:
+        sndCardFmt = AFMT_S16_BE;
+        break;
+    default:
+        fprintf(stderr, "WARNING: No payload selected, using Mu-law by default.");
+        sndCardFmt = AFMT_MU_LAW;
+        break;
     }
+
+    
+    int sndCardFD = -1;
+    //duplex mode is activated
+    configSndcard(&sndCardFD, &sndCardFmt, &channelNumber, &rate, &requestedFragmentSize, true);
+    vol = configVol(channelNumber, sndCardFD, vol);
 
     /*
     *   Circular buffer
@@ -98,11 +109,9 @@ int main(int argc, char** argv)
     *   Multicast socket configuration
     */
 
+    //TODO: support for local ip, non-multicast for testing
+
     //MCast packet test
-    #define MSG_SIZE 256
-    #define GROUP "239.0.1.1"
-    char recvBuffer[MSG_SIZE];
-    isize result;
 
     /*
     *   Multicast socket configuration
@@ -144,56 +153,11 @@ int main(int argc, char** argv)
     //HACK: if SSRC is odd we are the sender
     if (ssrc % 2) {
         trace("Sender!");
-
-        /* Using sendto to send information. Since I've bound the socket, the local (source)
-         port of the packet is fixed. In the rem structure I set the remote (destination) address and port */ 
-        char msg[MSG_SIZE] = "I am AudioC Sender!";
-        
-
-        /* Using sendto to send information. Since I've bind the socket, the local (source) port of the packet is fixed. In the rem structure I set the remote (destination) address and port */ 
-        if ( (result = sendto(sockId, msg, MSG_SIZE, /* flags */ 0, (struct sockaddr *) &sendAddr, sizeof(sendAddr)))<0) {
-            printf("sendto error\n");
-        } else {
-            printf("Sender: Using sendto to send data to multicast destination\n"); 
-        }
-
-        struct sockaddr_in remoteSAddr = {0}; 
-        socklen_t sockAddrInLength = sizeof (struct sockaddr_in); /* remember always to set the size of the rem variable in from_len */	
-        if ((result = recvfrom(sockId, recvBuffer, MSG_SIZE, 0, (struct sockaddr *) &remoteSAddr, &sockAddrInLength)) < 0) {
-            printf ("recvfrom error\n");
-        } else {
-            //recvBuffer[result-1] = 0; /* convert to 'string' by appending a 0 value (equal to '\0') after the last received character */
-            char ipBuf[64];
-            const char* ip = inet_ntop(AF_INET, &((struct sockaddr_in*)&remoteSAddr)->sin_addr, ipBuf, sizeof(ipBuf));
-            printf("Received message from %s. Message is: %s\n", ip, recvBuffer); fflush (stdout);
-        }
-
+        execSender(sockId, &sendAddr, sessionParams);
     } else {
         trace("Receiver!");
-
-        /* Using sendto to send information. Since I've bound the socket, the local (source)
-         port of the packet is fixed. In the rem structure I set the remote (destination) address and port */ 
-        char msg[MSG_SIZE] = "I am AudioC Receiver!";
-
-        struct sockaddr_storage remoteSAddr = {0}; 
-        socklen_t sockAddrInLength = sizeof (struct sockaddr_storage); /* remember always to set the size of the rem variable in from_len */	
-        if ((result = recvfrom(sockId, recvBuffer, MSG_SIZE, 0, (struct sockaddr *) &remoteSAddr, &sockAddrInLength)) < 0) {
-            printf ("recvfrom error\n");
-        } else {
-            //recvBuffer[result-1] = 0; /* convert to 'string' by appending a 0 value (equal to '\0') after the last received character */
-            char ipBuf[64];
-            const char* ip = inet_ntop(AF_INET, &((struct sockaddr_in*)&remoteSAddr)->sin_addr, ipBuf, sizeof(ipBuf));
-            printf("Received message from %s. Message is: %s\n", ip, recvBuffer); fflush (stdout);
-        }
-
-         if ( (result = sendto(sockId, msg, MSG_SIZE, /* flags */ 0, (struct sockaddr *) &sendAddr, sizeof(sendAddr)))<0) {
-            printf("sendto error\n");
-        } else {
-            printf("Receiver: Using sendto to send data to multicast destination\n"); 
-        }
-
+        execReceiver(sockId, &sendAddr);
     }
-
      
 
     /*
@@ -201,4 +165,77 @@ int main(int argc, char** argv)
     */
     cbuf_destroy_buffer(circularBuffer);
     return 0;
+}
+
+static void execSender(int sockId, struct sockaddr_in* sendAddr, session_params_t session)
+{  
+    char sendBuffer[MAX_PACKET_SIZE];
+    char recvBuffer[MAX_PACKET_SIZE];
+
+    ZERO_ARRAY(sendBuffer);
+
+    rtp_hdr_t rtpHeader = {
+        .version = RTP_VERSION,
+        .pt = session.pt,
+        .ssrc = htonl(session.ssrc),
+        .seq = htons(0), //TODO: make it random
+        .ts = htonl(0), //TODO: make it random for the initial value
+    };
+
+    //Test Audio samples
+    const size_t numSamples = 16;
+    i16* audioBuf = (i16*)(sendBuffer + sizeof(rtp_hdr_t));
+    usize msgSize = numSamples * sizeof(i16) + sizeof(rtp_hdr_t);
+    ASSERT(msgSize <= MAX_PACKET_SIZE);
+
+    for (size_t i = 0; i < numSamples; i++)
+    {
+        //To test endianness
+        audioBuf[i] = htons(i + 0xf00); //Convert host (LE) -> AFMT_S16_BE 
+    }    
+
+    isize result;
+    /* Using sendto to send information. Since I've bind the socket, the local (source) port of the packet is fixed. In the rem structure I set the remote (destination) address and port */ 
+    if ( (result = sendto(sockId, sendBuffer, msgSize, /* flags */ 0, (struct sockaddr *)sendAddr, sizeof(struct sockaddr_in)) )<0) {
+        panic("sendto error");
+    } else {
+        trace("Sender: Using sendto to send data to multicast destination\n"); 
+    }
+
+    struct sockaddr_in remoteSAddr = {0}; 
+    socklen_t sockAddrInLength = sizeof (struct sockaddr_in); /* remember always to set the size of the rem variable in from_len */	
+    if ((result = recvfrom(sockId, recvBuffer, MAX_PACKET_SIZE, 0, (struct sockaddr *) &remoteSAddr, &sockAddrInLength)) < 0) {
+        panic("recvfrom error\n");
+    } else {
+        recvBuffer[MIN(MAX_PACKET_SIZE-1, result)] = 0; 
+        char ipBuf[64];
+        const char* ip = inet_ntop(AF_INET, &remoteSAddr.sin_addr, ipBuf, sizeof(ipBuf));
+        trace("Received message from %s. Message is: %s\n", ip, recvBuffer);
+    }
+}
+
+static void execReceiver(int sockId, struct sockaddr_in* sendAddr)
+{
+    /* Using sendto to send information. Since I've bound the socket, the local (source)
+        port of the packet is fixed. In the rem structure I set the remote (destination) address and port */ 
+    char msg[MSG_SIZE] = "I am AudioC Receiver!";
+    char recvBuffer[MSG_SIZE];
+    isize result;
+
+    struct sockaddr_in remoteSAddr = {0}; 
+    socklen_t sockAddrInLength = sizeof (struct sockaddr_storage); /* remember always to set the size of the rem variable in from_len */	
+    if ((result = recvfrom(sockId, recvBuffer, MSG_SIZE, 0, (struct sockaddr *) &remoteSAddr, &sockAddrInLength)) < 0) {
+        printf ("recvfrom error\n");
+    } else {
+        recvBuffer[MIN(MSG_SIZE-1, result)] = 0; 
+        char ipBuf[64];
+        const char* ip = inet_ntop(AF_INET, &remoteSAddr.sin_addr, ipBuf, sizeof(ipBuf));
+        printf("Received message from %s. Message is: %s\n", ip, recvBuffer); fflush (stdout);
+    }
+
+        if ( (result = sendto(sockId, msg, MSG_SIZE, /* flags */ 0, (struct sockaddr*)sendAddr, sizeof(struct sockaddr_in)) )<0) {
+        printf("sendto error\n");
+    } else {
+        printf("Receiver: Using sendto to send data to multicast destination\n"); 
+    }
 }
