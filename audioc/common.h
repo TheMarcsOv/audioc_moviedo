@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -33,11 +34,10 @@ typedef __ssize_t isize;
 #define ASSERT(X) 
 #endif
 
-#ifdef AC_DEBUG
-#define LOG(...) fprintf(stderr, __VA_ARGS__)
-#else
-#define LOG(...) 
-#endif
+extern bool DEBUG_TRACES_ENABLED;
+void trace(const char* fmt, ...); 
+
+void panic(const char* fmt, ...);
 
 /*
  * Utility functions 

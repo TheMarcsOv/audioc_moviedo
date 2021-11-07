@@ -28,8 +28,6 @@ int main(int argc, char** argv)
     u32 bufferingTime; //in ms
     bool verbose;
     u8 payload;
-
-    LOG("DEBUG: test!\n");
     
     if (args_capture_audioc(argc, argv, &multicastIp, &ssrc,
             &port, &vol, &packetDuration, &verbose, &payload, &bufferingTime) == EXIT_FAILURE)
@@ -37,6 +35,14 @@ int main(int argc, char** argv)
         exit(1);  /* there was an error parsing the arguments, error info
                    is printed by the args_capture function */
     };
+
+    if (verbose) DEBUG_TRACES_ENABLED = true;
+
+    trace("AudioC init...");
+
+    if (verbose) {
+        args_print_audioc(multicastIp, ssrc, port, packetDuration, payload, bufferingTime, vol, verbose);
+    }
 
     /*
     *   Signal handler configuration
@@ -49,8 +55,7 @@ int main(int argc, char** argv)
     sigemptyset(&sigInfo.sa_mask);
     
     if ((sigaction (SIGINT, &sigInfo, NULL)) < 0) {
-        printf("Error installing signal, error: %s", strerror(errno));
-        exit(1);
+        panic("Error installing signal.");
     }
 
     /*
@@ -68,7 +73,7 @@ int main(int argc, char** argv)
         sndCardFmt = AFMT_S16_BE;
         break;
     default:
-        printf("WARNING: No payload selected, using Mu-law by default.");
+        fprintf(stderr, "WARNING: No payload selected, using Mu-law by default.");
         sndCardFmt = AFMT_MU_LAW;
         break;
     }
@@ -97,19 +102,16 @@ int main(int argc, char** argv)
     int socketDesc;
     if ((socketDesc = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
     {
-        printf("Socket could not be openned!\n");
-        exit(EXIT_FAILURE);
+        panic("Socket could not be opened!\n");
     }
 
     int enable = 1;
     if (setsockopt(socketDesc, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0) {
-        printf("setsockopt(SO_REUSEADDR) failed!\n");
-        exit(EXIT_FAILURE);
+        panic("setsockopt(SO_REUSEADDR) failed!\n");
     }
 
     if (bind(socketDesc, (struct sockaddr *)&sendAddr, sizeof(struct sockaddr_in)) < 0) {
-        printf("Socket bind error!\n");
-        exit(EXIT_FAILURE);
+        panic("Socket bind error!\n");
     }
 
     //Join multicast group
@@ -117,12 +119,13 @@ int main(int argc, char** argv)
     mcRequest.imr_multiaddr = multicastIp;
     mcRequest.imr_interface.s_addr = htonl(INADDR_ANY);
     if (setsockopt(socketDesc, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mcRequest, sizeof(struct ip_mreq)) < 0) {
-        printf("setsockopt error");
-        exit(EXIT_FAILURE);
+        panic("Failed to join multicast group, setsockopt error");
     }
 
     u8 loopback = 0;
-    setsockopt(socketDesc, IPPROTO_IP, IP_MULTICAST_LOOP, &loopback, sizeof(u8));
+    if (setsockopt(socketDesc, IPPROTO_IP, IP_MULTICAST_LOOP, &loopback, sizeof(u8)) < 0) {
+        panic("Failed to disable MC loopback, setsockopt error");
+    }
 
 
     /*
