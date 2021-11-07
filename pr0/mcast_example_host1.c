@@ -55,6 +55,12 @@ int main(void) {
         exit(1); /* failure */
     }
 
+    int enable = 1;
+    if (setsockopt(sockId, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0) {
+        printf("setsockopt(SO_REUSEADDR) failed");
+        exit(1);
+    }
+
     if (bind(sockId, (struct sockaddr *)&localSAddr, sizeof(struct sockaddr_in)) < 0) {
         printf("bind error\n");
         exit(1);
