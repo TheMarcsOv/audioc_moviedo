@@ -21,9 +21,7 @@ void trace(const char* fmt, ...)
     }
 }
 
-//Prints an error message formatted by fmt and its arguments, and exits the program.
-//It also prints the latest errno and strerror
-void panic(const char* fmt, ...)
+void printError(const char* fmt, ...)
 {
     int err = errno;
     fprintf(stderr, "[ERROR]: ");
@@ -32,5 +30,4 @@ void panic(const char* fmt, ...)
     vfprintf(stderr, fmt, list);
     va_end(list);
     fprintf(stderr, "\n\tLast error(errno=%d): %s\n", err, strerror(err));
-    exit(1);
 }

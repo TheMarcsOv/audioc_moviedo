@@ -1,2 +1,3 @@
 #!/bin/bash
-./bin/audioc 224.0.0.121 0 -c
+./build.sh
+bin/audioc 239.0.1.1 $1 -c
