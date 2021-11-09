@@ -1,0 +1,25 @@
+sendto no bloquea
+
+se recomienda 2 bucles:
+while (cond)
+{
+    //todavía no hay suficientes datos iniciales
+    //depende de -l 
+    //           -y
+    // = num bytes por paquete (siempre potencias de 2)
+    // -k = t. buffering, en ms -> traducir en nº paquetes
+    // Hay que :
+    // grabar micro y recvfrom de la network
+    //recvfrom -> cbuf
+    //cond = cuando se llene cbuf hasta el límite
+}
+while(true) {
+    //aquí además ya se empieza a reproducir audio
+    //análisis de paquetes perdidos y silencios etc
+}
+
+-l40 -> 40 ms -> b per sample, fs, canales ...
+- esto da una hint del tamaño requested
+- te redondea a potde2
+- volver a convertier en ms 
+-k buffer

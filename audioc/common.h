@@ -10,7 +10,7 @@
 /*
 * Common constants
 */
-#define MAX_PACKET_SIZE 1024
+#define MAX_PACKET_SIZE (1024 + 12)
 
 /*
 * Common types
