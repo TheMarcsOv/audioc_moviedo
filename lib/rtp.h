@@ -4,6 +4,8 @@
 
 /* Modified for use in UC3M lab */
 
+#pragma once
+
 #include "types.h"   /* changed from <sys/types.h> by Akira 12/27/01 */
 #include "sysdep.h"
 

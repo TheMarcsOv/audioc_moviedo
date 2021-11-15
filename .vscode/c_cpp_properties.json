@@ -10,6 +10,22 @@
             "cStandard": "gnu99",
             "cppStandard": "gnu++14",
             "intelliSenseMode": "linux-gcc-x64"
+        },
+        {
+            "name": "Windev",
+            "includePath": [
+                "${workspaceFolder}/**"
+            ],
+            "defines": [
+                "_DEBUG",
+                "UNICODE",
+                "_UNICODE"
+            ],
+            "windowsSdkVersion": "10.0.19041.0",
+            "compilerPath": "",
+            "cStandard": "gnu99",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "linux-gcc-x64"
         }
     ],
     "version": 4
