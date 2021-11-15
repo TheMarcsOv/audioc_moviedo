@@ -4,10 +4,13 @@
 #include <stdbool.h>
 #include <string.h>
 #include <errno.h>
+#include <unistd.h>
 #include <sys/soundcard.h>
+
 
 #include "common.h"
 #include "audiocArgs.h"
+#include "audioc_rtp.h"
 #include "../lib/circularBuffer.h"
 #include "../lib/configureSndcard.h"
 #include "../lib/rtp.h"
@@ -16,13 +19,16 @@ typedef enum payload payload_t;
 typedef struct {
     u32 ssrc;
     u8 pt;
-    u32 packetBytes;
+    u32 fragmentBytes;
     u32 bytesPerSample;
 } session_params_t;
 
 static void signalHandler(int sigNum)
 {
 	(void) sigNum;
+    //TODO: handle signal:
+    //Print time
+    //Close everything ......
 }
 
 static void execSender(int sockId, struct sockaddr_in* sendAddr, session_params_t session);
@@ -113,7 +119,7 @@ int main(int argc, char** argv)
     session_params_t sessionParams = {
         .ssrc = ssrc,
         .pt = payload,
-        .packetBytes = requestedFragmentSize, //hard coded for now, requestedFragmentSize,
+        .fragmentBytes = requestedFragmentSize, 
         .bytesPerSample = bytesPerSample,
     };
     
@@ -123,9 +129,10 @@ int main(int argc, char** argv)
     */
     //TODO: fill from bufferingTime
     int bufferingBytes = bufferingTime * rate * channelNumber * bytesPerSample / 1000;
-    int numberOfBlocks = 2 * bufferingBytes / requestedFragmentSize;
-    trace("Num. blocks in cbuf: %d\n", numberOfBlocks);
-    void* circularBuffer = cbuf_create_buffer(numberOfBlocks, requestedFragmentSize);
+    int bufferingBlocks = bufferingBytes / requestedFragmentSize;
+    int blockCapacity = 2 * bufferingBlocks;
+    trace("Num. blocks in cbuf: %d\n", blockCapacity);
+    void* circularBuffer = cbuf_create_buffer(blockCapacity, requestedFragmentSize);
     
     /*
     *   Multicast socket configuration
@@ -180,6 +187,105 @@ int main(int argc, char** argv)
         trace("Receiver!");
         execReceiver(sockId, &sendAddr, sessionParams);
     }
+
+    size_t expectedPacketSize = session.fragmentBytes + sizeof(rtp_hdr_t);
+    rtp_packet_t* micPacketBuffer = (rtp_packet_t*) malloc(expectedPacketSize);
+    struct timeval timeout;
+    fd_set readSet, writeSet;
+
+    //RTP State variables
+    u16 outputSequenceNum = 0; //TODO: make it random
+    u32 outputTimeStamp = 0; //TODO: make it random
+
+    //TODO: Measure time
+    isize cbufAccumulated = 0; //in blocks
+    while (cbufAccumulated < bufferingBlocks)
+    {
+        timeout.tv_sec = 10;
+        timeout.tv_usec = 0;
+
+        FD_ZERO(&readSet);
+        FD_SET(sndCardFD, &readSet); //Microphone read
+        FD_SET(sockId, &readSet); //Network read
+        
+        FD_ZERO(&writeSet);
+        // FD_SET(sockId, &writeSet); //Network write
+        // Network writes don't block for a long time
+
+        int res = 0;
+        if ((res = select(FD_SETSIZE, &readSet, &writeSet, NULL, &timeout)) <0) 
+        {
+            int error = errno;
+            switch (error)
+            {
+            case EINTR:
+                fprintf(stderr, "select has been interrupted.\n");
+                break;
+            default:
+                panic("select() error!");
+                break;
+            }
+        } else if (res > 0) {
+            //Reads
+            if (FD_ISSET(sndCardFD, &readSet)) 
+            {
+                //We can read from the sound card
+                u8* fragmentBuffer = (u8*)micPacketBuffer->payload;
+                usize fragmentSize = sessionParams.fragmentBytes;
+                usize numSamples = session.fragmentBytes / session.bytesPerSample;
+
+                isize readBytes;
+                if ((readBytes = read(sndCardFD, fragmentBuffer, fragmentSize)) < 0)
+                {
+                    panic("Error reading %lu bytes (%lu samples) from sound card file", fragmentSize, numSamples);
+                } else if (readBytes != fragmentSize)
+                {
+                    panic("Incomplete read of %lu bytes (actually read %lu bytes) from sound card file", fragmentSize, readBytes);
+                }
+
+                // Fill up RTP Header
+                packet->header = (rtp_hdr_t) {
+                    .version = RTP_VERSION,
+                    .pt = session.pt,
+                    .ssrc = session.ssrc,
+                    .seq = outputSequenceNum, 
+                    .ts = outputTimeStamp, //TODO: make it random for the initial value
+                };
+
+                trace("RTP Header to send:");
+                printRTPHeader(&packet->header);
+
+                htonRTP(&packet->header);
+
+                isize result;
+                /* Using sendto to send information. Since I've bind the socket, the local (source) port of the packet is fixed. In the rem structure I set the remote (destination) address and port */ 
+                if ( (result = sendto(sockId, micPacketBuffer, expectedPacketSize, /* flags */ 0, (struct sockaddr *)&sendAddr, sizeof(struct sockaddr_in)) )<0) {
+                    panic("sendto error");
+                } else {
+                    trace("Packet with ts=%lu sent to network", outputTimeStamp); 
+                }
+
+                //Once we send it, seq and ts is incremented for the next packet
+                outputSequenceNum += 1;
+                outputTimeStamp += numSamples;
+            }
+            if (FD_ISSET(sockId, &readSet)) {
+                
+            }
+
+            //Write
+            // if (FD_ISSET(sndCardFD, &writeSet)) {
+                
+            // }
+            // if (FD_ISSET(sockId, &writeSet)) {
+                
+            // }
+
+        } else {
+            printf("Timeout has expired.\n");
+        }
+    }
+    
      
 
     /*
@@ -189,32 +295,6 @@ int main(int argc, char** argv)
     return 0;
 }
 
-//Does no endianness conversion
-static void printRTPHeader(rtp_hdr_t* rtp) {
-    printf("RTP Header: \n");
-    printf("\tVersion: %d\n", rtp->version);
-    printf("\tPadding: %d\n", rtp->p);
-    printf("\tExtension: %d\n", rtp->x);
-    printf("\tCSRC Count: %d\n", rtp->cc);
-    printf("\tMarker: %d\n", rtp->m);
-    const char* ptStr = rtp->pt == PCMU ? "PCMU" : (rtp->pt == L16_1 ? "L16_1" : "Unknown");
-    printf("\tPayload Type: %d (%s)\n", rtp->pt, ptStr);
-    printf("\tSequence Num: %d\n", rtp->seq);
-    printf("\tTimestamp: %d\n", rtp->ts);
-    printf("\tSSRC: %.X\n", rtp->ssrc);
-}
-
-static void ntohRTP(rtp_hdr_t* header) {
-    header->ssrc = ntohl(header->ssrc);
-    header->seq = ntohs(header->seq);
-    header->ts = ntohl(header->ts);
-}
-
-static void htonRTP(rtp_hdr_t* header) {
-    header->ssrc = htonl(header->ssrc);
-    header->seq = htons(header->seq);
-    header->ts = htonl(header->ts);
-}
 
 static void execSender(int sockId, struct sockaddr_in* sendAddr, session_params_t session)
 {  
@@ -222,10 +302,10 @@ static void execSender(int sockId, struct sockaddr_in* sendAddr, session_params_
     char recvBuffer[MAX_PACKET_SIZE];
 
     ZERO_ARRAY(sendBuffer);
-    const size_t expectedPacketSize = session.packetBytes + sizeof(rtp_hdr_t);
+    const size_t expectedPacketSize = session.fragmentBytes + sizeof(rtp_hdr_t);
 
-    rtp_hdr_t* rtpHeader = (rtp_hdr_t*) sendBuffer;
-    *rtpHeader = (rtp_hdr_t) {
+    rtp_packet_t* packet = (rtp_packet_t*) sendBuffer;
+    packet->header = (rtp_hdr_t) {
         .version = RTP_VERSION,
         .pt = session.pt,
         .ssrc = session.ssrc,
@@ -234,14 +314,14 @@ static void execSender(int sockId, struct sockaddr_in* sendAddr, session_params_
     };
 
     trace("RTP Header to send:\n");
-    printRTPHeader(rtpHeader);
+    printRTPHeader(&packet->header);
 
-    htonRTP(rtpHeader);
+    htonRTP(&packet->header);
 
     //Test Audio samples
     ASSERT(session.pt == L16_1);
-    const size_t numSamples = session.packetBytes / session.bytesPerSample;
-    i16* audioBuf = (i16*)(sendBuffer + sizeof(rtp_hdr_t));
+    const size_t numSamples = session.fragmentBytes / session.bytesPerSample;
+    i16* audioBuf = (i16*)packet->payload;
     usize msgSize = numSamples * sizeof(i16) + sizeof(rtp_hdr_t);
     ASSERT(msgSize <= expectedPacketSize);
 
@@ -283,7 +363,7 @@ static void execReceiver(int sockId, struct sockaddr_in* sendAddr, session_param
     isize result;
     ASSERT(session.pt == L16_1);
 
-    const size_t expectedPacketSize = session.packetBytes + sizeof(rtp_hdr_t);
+    const size_t expectedPacketSize = session.fragmentBytes + sizeof(rtp_hdr_t);
 
     struct sockaddr_in remoteSAddr = {0}; 
     socklen_t sockAddrInLength = sizeof (struct sockaddr_in); /* remember always to set the size of the rem variable in from_len */	
@@ -298,15 +378,15 @@ static void execReceiver(int sockId, struct sockaddr_in* sendAddr, session_param
 
     //TODO: make this more robust
     ASSERT(result == (isize)expectedPacketSize);
-    rtp_hdr_t* header = (rtp_hdr_t*)recvBuffer;
-    ntohRTP(header);
-    printRTPHeader(header);
+    rtp_packet_t* packet = (rtp_packet_t*)recvBuffer;
+    ntohRTP(&packet->header);
+    printRTPHeader(&packet->header);
 
     i32 remainingBytes = result - sizeof(rtp_hdr_t);
-    ASSERT(remainingBytes == (i32)session.packetBytes);
-    i16* samples = (i16*)(recvBuffer + sizeof(rtp_hdr_t)); 
+    ASSERT(remainingBytes == (i32)session.fragmentBytes);
+    i16* samples = (i16*)packet->payload; 
     //Check samples
-    size_t nSamples = session.packetBytes / session.bytesPerSample;
+    size_t nSamples = session.fragmentBytes / session.bytesPerSample;
     bool validSamples = true;
     for (size_t i = 0; i < nSamples; i++)
     {
@@ -318,9 +398,9 @@ static void execReceiver(int sockId, struct sockaddr_in* sendAddr, session_param
     if (validSamples) trace("Received samples are valid!");
     else trace("Received samples are invalid!!!");
 
-    header->ssrc = 1;
-    header->seq += 1;
-    htonRTP(header);
+    packet->header.ssrc = 1;
+    packet->header.seq += 1;
+    htonRTP(&packet->header);
 
     if ( (result = sendto(sockId, recvBuffer, expectedPacketSize, 0, (struct sockaddr*)sendAddr, sizeof(struct sockaddr_in)) )<0) {
         panic("sendto error\n");

@@ -2,6 +2,9 @@
     "files.associations": {
         "signal.h": "c",
         "circularbuffer.h": "c",
-        "stdio.h": "c"
+        "stdio.h": "c",
+        "rtp.h": "c",
+        "sysdep.h": "c",
+        "configuresndcard.h": "c"
     }
 }
