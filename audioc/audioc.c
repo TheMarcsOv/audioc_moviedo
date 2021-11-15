@@ -318,8 +318,12 @@ static void execReceiver(int sockId, struct sockaddr_in* sendAddr, session_param
     if (validSamples) trace("Received samples are valid!");
     else trace("Received samples are invalid!!!");
 
-    header->ssrc = 1;
+    header->ssrc = session.ssrc;
     header->seq += 1;
+    
+    trace("RTP Header to send back:");
+    printRTPHeader(header);
+
     htonRTP(header);
 
     if ( (result = sendto(sockId, recvBuffer, expectedPacketSize, 0, (struct sockaddr*)sendAddr, sizeof(struct sockaddr_in)) )<0) {
