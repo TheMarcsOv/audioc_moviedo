@@ -1,7 +1,7 @@
 #include "audioc_rtp.h"
 
 #include <stdio.h>
-#include "audiocArgs.h"
+
 
 //Does no endianness conversion
 void printRTPHeader(rtp_hdr_t* rtp) {
@@ -11,7 +11,7 @@ void printRTPHeader(rtp_hdr_t* rtp) {
     printf("\tExtension: %d\n", rtp->x);
     printf("\tCSRC Count: %d\n", rtp->cc);
     printf("\tMarker: %d\n", rtp->m);
-    const char* ptStr = rtp->pt == PCMU ? "PCMU" : (rtp->pt == L16_1 ? "L16_1" : "Unknown");
+    const char* ptStr = payloadToStr(rtp->pt);
     printf("\tPayload Type: %d (%s)\n", rtp->pt, ptStr);
     printf("\tSequence Num: %d\n", rtp->seq);
     printf("\tTimestamp: %d\n", rtp->ts);
@@ -29,3 +29,5 @@ void htonRTP(rtp_hdr_t* header) {
     header->seq = htons(header->seq);
     header->ts = htonl(header->ts);
 }
+
+
