@@ -29,10 +29,63 @@ static void signalHandler(int sigNum)
     //TODO: handle signal:
     //Print time
     //Close everything ......
+    printf("Interrupted audioc\n");
+    exit(0);
 }
 
-static void execSender(int sockId, struct sockaddr_in* sendAddr, session_params_t session);
-static void execReceiver(int sockId, struct sockaddr_in* sendAddr, session_params_t session);
+//static void execSender(int sockId, struct sockaddr_in* sendAddr, session_params_t session);
+//static void execReceiver(int sockId, struct sockaddr_in* sendAddr, session_params_t session);
+
+static void readAudioFragment(int sndCardFD, rtp_packet_t* packet)
+{
+    u8* fragmentBuffer = (u8*)packet->payload;
+    usize fragmentSize = sessionParams.fragmentBytes;
+
+    isize readBytes;
+    if ((readBytes = read(sndCardFD, fragmentBuffer, fragmentSize)) < 0)
+    {
+        panic("Error reading %lu bytes (%lu samples) from sound card file", fragmentSize, samplesPerPacket);
+    } else if ((usize)readBytes != fragmentSize)
+    {
+        panic("Incomplete read of %lu bytes (actually read %lu bytes) from sound card file", fragmentSize, readBytes);
+    }
+}
+
+static void sendAudioPacket(rtp_packet_t* packet, int sockId, struct sockaddr_in* sendAddr, session_params_t sessionParams, u16 outputSequenceNum, u32 outputTimeStamp)
+{
+    packet->header = (rtp_hdr_t) {
+        .version = RTP_VERSION,
+        .pt = sessionParams.pt,
+        .ssrc = sessionParams.ssrc,
+        .seq = outputSequenceNum, 
+        .ts = outputTimeStamp, //TODO: make it random for the initial value
+    };
+
+    htonRTP(&packet->header);
+
+    isize result;
+    usize packetSize = sessionParams.fragmentBytes + sizeof(rtp_hdr_t);
+    /* Using sendto to send information. Since I've bind the socket, the local (source) port of the packet is fixed. In the rem structure I set the remote (destination) address and port */ 
+    if ( (result = sendto(sockId, packet, packetSize, /* flags */ 0, (struct sockaddr *)sendAddr, sizeof(struct sockaddr_in)) )<0) {
+        panic("sendto error");
+    } else {
+        //trace("Packet with ts=%lu sent to network", outputTimeStamp); 
+        printf("."); fflush(stdout); 
+    }
+}
+
+static bool validateRTPHeader(rtp_hdr_t* header)
+{
+    if (header->version != RTP_VERSION) {
+        return false;
+    }
+
+    if (header->pt != sessionParams.pt) {
+        fprintf(stderr, "Payload type mismatch between nodes (%s, expected %s). Closing. \n", payloadToStr(header->pt), payloadToStr(sessionParams.pt));
+        return false;
+    }
+    return true;
+}
 
 int main(int argc, char** argv)
 {
@@ -128,11 +181,16 @@ int main(int argc, char** argv)
     *   Circular buffer
     */
     //TODO: fill from bufferingTime
-    bufferingTime += 200; // for 
+    //bufferingTime += 200; // for 
     int bufferingBytes = bufferingTime * rate * channelNumber * bytesPerSample / 1000;
     int bufferingBlocks = bufferingBytes / requestedFragmentSize;
-    trace("Num. blocks in cbuf: %d\n", bufferingBlocks);
-    void* circularBuffer = cbuf_create_buffer(bufferingBlocks, requestedFragmentSize);
+    
+    int bufferByteCapacity = bufferingBytes + (200 * rate * channelNumber * bytesPerSample / 1000);
+    int bufferBlockCapacity = bufferByteCapacity / requestedFragmentSize;
+
+    trace("Num. blocks in cbuf: %d, buffer block threshold: %d\n", bufferBlockCapacity, bufferingBlocks);
+    
+    void* circularBuffer = cbuf_create_buffer(bufferBlockCapacity, requestedFragmentSize);
     
     /*
     *   Multicast socket configuration
@@ -179,15 +237,6 @@ int main(int argc, char** argv)
         panic("Failed to disable MC loopback, setsockopt error");
     }
 
-    //HACK: if SSRC is odd we are the sender
-    if (ssrc % 2) {
-        trace("Sender!");
-        execSender(sockId, &sendAddr, sessionParams);
-    } else {
-        trace("Receiver!");
-        execReceiver(sockId, &sendAddr, sessionParams);
-    }
-
     usize expectedPacketSize = sessionParams.fragmentBytes + sizeof(rtp_hdr_t);
     usize samplesPerPacket = sessionParams.fragmentBytes / sessionParams.bytesPerSample;
     rtp_packet_t* packet = (rtp_packet_t*) malloc(expectedPacketSize);
@@ -218,9 +267,10 @@ int main(int argc, char** argv)
         FD_ZERO(&writeSet);
         // FD_SET(sockId, &writeSet); //Network write
         // Network writes don't block for a long time
-
+        
+        //No timeout in 1st phase
         int res = 0;
-        if ((res = select(FD_SETSIZE, &readSet, &writeSet, NULL, &timeout)) <0) 
+        if ((res = select(FD_SETSIZE, &readSet, &writeSet, NULL, NULL)) <0) 
         {
             int error = errno;
             switch (error)
@@ -237,40 +287,9 @@ int main(int argc, char** argv)
             if (FD_ISSET(sndCardFD, &readSet)) 
             {
                 //We can read from the sound card
-                u8* fragmentBuffer = (u8*)packet->payload;
-                usize fragmentSize = sessionParams.fragmentBytes;
                 
-
-                isize readBytes;
-                if ((readBytes = read(sndCardFD, fragmentBuffer, fragmentSize)) < 0)
-                {
-                    panic("Error reading %lu bytes (%lu samples) from sound card file", fragmentSize, samplesPerPacket);
-                } else if (readBytes != fragmentSize)
-                {
-                    panic("Incomplete read of %lu bytes (actually read %lu bytes) from sound card file", fragmentSize, readBytes);
-                }
-
-                // Fill up RTP Header
-                packet->header = (rtp_hdr_t) {
-                    .version = RTP_VERSION,
-                    .pt = sessionParams.pt,
-                    .ssrc = sessionParams.ssrc,
-                    .seq = outputSequenceNum, 
-                    .ts = outputTimeStamp, //TODO: make it random for the initial value
-                };
-
-                trace("RTP Header to send:");
-                printRTPHeader(&packet->header);
-
-                htonRTP(&packet->header);
-
-                isize result;
-                /* Using sendto to send information. Since I've bind the socket, the local (source) port of the packet is fixed. In the rem structure I set the remote (destination) address and port */ 
-                if ( (result = sendto(sockId, packet, expectedPacketSize, /* flags */ 0, (struct sockaddr *)&sendAddr, sizeof(struct sockaddr_in)) )<0) {
-                    panic("sendto error");
-                } else {
-                    trace("Packet with ts=%lu sent to network", outputTimeStamp); 
-                }
+                readAudioFragment(sndCardFD, packet);
+                sendAudioPacket(packet, sockId, &sendAddr, sessionParams, outputSequenceNum, outputTimeStamp);               
 
                 //Once we send it, seq and ts is incremented for the next packet
                 outputSequenceNum += 1;
@@ -283,114 +302,224 @@ int main(int argc, char** argv)
                 
                 if ((result = recvfrom(sockId, packet, expectedPacketSize, 0, (struct sockaddr *) &remoteSAddr, &sockAddrInLength)) < 0) {
                     panic("recvfrom error");
-                } else if (result != expectedPacketSize) {
+                } else if ((usize)result != expectedPacketSize) {
                     //TODO: Fix if this happens
                     panic("Expected to receive full sized packet!");
-                } else {
+                }
+
+                ASSERT(result == (isize)expectedPacketSize);
+                rtp_hdr_t* header = &packet->header;
+                ntohRTP(header);
+
+                if (!validateHeader(&packet->header)) {
+                    fprintf(stderr, "Invalid received RTP packet. Exiting.");
+                    exit(1);
+                }
+
+                if (!startedReceiving) { 
+                    startedReceiving = true;
+                    inputSequenceNum = header->seq;
+                    inputTimeStamp = header->ts;
+
                     char ipBuf[64];
                     const char* ip = inet_ntop(AF_INET, &remoteSAddr.sin_addr, ipBuf, sizeof(ipBuf));
-                    //trace("Received message from %s. Size: %d bytes\n", ip, result);
+                    trace("Started receiving from %s.\n", ip, result);
+                } else {
+                    i32 seqDifference = seqNumDifference(inputSequenceNum, header->seq);
+                    i64 tsDifference = timestampDifference(inputTimeStamp, header->ts);
 
-                    ASSERT(result == (isize)expectedPacketSize);
-                    rtp_hdr_t* header = &packet->header;
-                    ntohRTP(header);
-
-                    if (header->version != RTP_VERSION) {
-                        trace("Received invalid RTP Header, dropping");
-                        continue;
-                    }
-
-                    if (header->pt != sessionParams.pt) {
-                        fprintf(stderr, "Payload type mismatch between nodes (%s, expected %s). Closing. \n", payloadToStr(header->pt), payloadToStr(sessionParams.pt));
+                    if (tsDifference % samplesPerPacket != 0) {
+                        fprintf(stderr, "Mismatched packet sizes, exiting program.");
                         exit(1);
                     }
 
-                    if (!startedReceiving) { 
-                        startedReceiving = true;
-                        inputSequenceNum = header->seq;
-                        inputTimeStamp = header->ts;
-                    } else {
-                        i32 seqDifference = seqNumDifference(inputSequenceNum, header->seq);
-                        i64 tsDifference = timestampDifference(inputTimeStamp, header->ts);
-
-                        if (tsDifference % samplesPerPacket != 0) {
-                            fprintf(stderr, "Mismatched packet sizes, exiting program.");
-                            exit(1);
+                    if (seqDifference == 1) {
+                        //Packet received as expected
+                        if(tsDifference > (i64)samplesPerPacket) {
+                            trace("Silence in buffering phase!");
+                            continue;
                         }
 
-                        if(tsDifference < 0 || tsDifference > (i64)samplesPerPacket) {
-                            //Received previous samples, ignore
-                            //Either last packet was smaller than samplesPerPacket or
-                            //this is a retransmission? ignore
-                        }
-
-                        if (seqDifference == 1) {
-                            //Packet received as expected
-                            if (tsDifference == (i64)samplesPerPacket) {
-                                //Packet received as expected
-                            } else if(tsDifference > (i64)samplesPerPacket) {
-                                //Samples have been skipped (not sent, no loss occured), we need to introduce a silence
-                                i64 numBlocks = tsDifference / samplesPerPacket;
-                                ASSERT(numBlocks > 1);
-                                i64 numSilenceBlocks = numBlocks - 1;
-                                for (usize i = 0; i < numSilenceBlocks; i++)
-                                {
-                                    void* bufferBlock = cbuf_pointer_to_write(circularBuffer);
-                                    if (bufferBlock)
-                                        memcpy(bufferBlock, packet->payload, sessionParams.fragmentBytes);
-                                    else {
-                                        fprintf(stderr, "Circular buffer is full, dropping silences.\n");
-                                        break;
-                                    }
-                                }
-                            }
-
-                            void* bufferBlock = cbuf_pointer_to_write(circularBuffer);
-                            if (bufferBlock)
-                                memcpy(bufferBlock, packet->payload, sessionParams.fragmentBytes);
-                            else {
-                                fprintf(stderr, "Circular buffer is full, dropping packet.\n");
-                            }
-                        } else if(seqDifference > 1) {
-                            //1 or more packets have been lost
-                            i64 lostPackets = seqDifference - 1;
-                            //Compute silence time from tsDifference
-                        } else if(seqDifference < 0) {
-                            //Received a previous packet
+                        void* bufferBlock = cbuf_pointer_to_write(circularBuffer);
+                        if (bufferBlock) {
+                            memcpy(bufferBlock, packet->payload, sessionParams.fragmentBytes);
+                            cbufAccumulated++;
                         } else {
-                            //Retransmission, ignore
+                            fprintf(stderr, "Circular buffer is full, dropping packet.\n");
                         }
-
-                        inputSequenceNum = header->seq;
-                        inputTimeStamp = header->ts;
+                    } else {
+                        trace("Warning: Unexpected sequence number received in buffering phase!");
                     }
 
-                    //printRTPHeader(header);
+                    inputSequenceNum = header->seq;
+                    inputTimeStamp = header->ts;
                 }
             }
-
-            //Write
-            // if (FD_ISSET(sndCardFD, &writeSet)) {
-                
-            // }
-            // if (FD_ISSET(sockId, &writeSet)) {
-                
-            // }
 
         } else {
             printf("Timeout has expired.\n");
         }
     }
     
-     
+    trace("Finished buffering phase.");
+
+#if 0
+    //Play out the samples
+    for (int i = 0; i < cbufAccumulated; i++) {
+        if (cbuf_has_block(circularBuffer)) {
+            u8* block = cbuf_pointer_to_read(circularBuffer);
+            ASSERT(block);
+            printf("*"); fflush(stdout);
+            write(sndCardFD, block, sessionParams.fragmentBytes);
+        }
+    }
+#endif
+
+    while (1) {
+        memset(packet, 0, expectedPacketSize);
+
+        timeout.tv_sec = 10;
+        timeout.tv_usec = 0;
+
+        FD_ZERO(&readSet);
+        FD_SET(sndCardFD, &readSet); //Microphone read
+        FD_SET(sockId, &readSet); //Network read
+        
+        FD_ZERO(&writeSet);
+        FD_SET(sndCardFD, &readSet); //Microphone read
+        FD_SET(sockId, &writeSet); //Network write
+        // Network writes don't block for a long time
+        
+        //No timeout in 1st phase
+        int res = 0;
+        if ((res = select(FD_SETSIZE, &readSet, &writeSet, NULL, &timeout)) <0) 
+        {
+            int error = errno;
+            switch (error)
+            {
+            case EINTR:
+                fprintf(stderr, "select has been interrupted.\n");
+                break;
+            default:
+                panic("select() error!");
+                break;
+            }
+        } else if (res > 0) {
+            if (FD_ISSET(sndCardFD, &readSet)) {
+                //We can read from the sound card
+                
+                readAudioFragment(sndCardFD, packet);
+                sendAudioPacket(packet, sockId, &sendAddr, sessionParams, outputSequenceNum, outputTimeStamp);               
+
+                //Once we send it, seq and ts is incremented for the next packet
+                outputSequenceNum += 1;
+                outputTimeStamp += samplesPerPacket;
+            }
+            if (FD_ISSET(sockId, &readSet)) {
+                
+                isize result;
+                struct sockaddr_in remoteSAddr = {0}; 
+                socklen_t sockAddrInLength = sizeof (struct sockaddr_in); /* remember always to set the size of the rem variable in from_len */	
+                
+                if ((result = recvfrom(sockId, packet, expectedPacketSize, 0, (struct sockaddr *) &remoteSAddr, &sockAddrInLength)) < 0) {
+                    panic("recvfrom error");
+                } else if ((usize)result != expectedPacketSize) {
+                    //TODO: Fix if this happens
+                    panic("Expected to receive full sized packet!");
+                }
+
+                ASSERT(result == (isize)expectedPacketSize);
+                rtp_hdr_t* header = &packet->header;
+                ntohRTP(header);
+
+                if (!validateHeader(&packet->header)) {
+                    fprintf(stderr, "Invalid received RTP packet. Exiting.");
+                    exit(1);
+                }
+                   
+                i32 seqDifference = seqNumDifference(inputSequenceNum, header->seq);
+                i64 tsDifference = timestampDifference(inputTimeStamp, header->ts);
+
+                if (tsDifference % samplesPerPacket != 0) {
+                    fprintf(stderr, "Mismatched packet sizes, exiting program.");
+                    exit(1);
+                }
+
+                if(tsDifference < 0 || tsDifference > (i64)samplesPerPacket) {
+                    //Received previous samples, ignore
+                    //Either last packet was smaller than samplesPerPacket or
+                    //this is a retransmission? ignore
+                }
+
+                if (seqDifference == 1) {
+                    //Packet received as expected
+                    if (tsDifference == (i64)samplesPerPacket) {
+                        //Packet received as expected
+                    } else if(tsDifference > (i64)samplesPerPacket) {
+                        trace("Silence in buffering phase!");
+                        //Samples have been skipped (not sent, no loss occured), we need to introduce a silence
+                        //Assuming no silences
+                        i64 numBlocks = tsDifference / samplesPerPacket;
+                        ASSERT(numBlocks > 1);
+                        i64 numSilenceBlocks = numBlocks - 1;
+                        for (i64 i = 0; i < numSilenceBlocks; i++)
+                        {
+                            void* bufferBlock = cbuf_pointer_to_write(circularBuffer);
+                            if (bufferBlock) {
+                                memcpy(bufferBlock, packet->payload, sessionParams.fragmentBytes);
+                            }
+                            else {
+                                fprintf(stderr, "Circular buffer is full, dropping silences.\n");
+                                break;
+                            }
+                            cbufAccumulated++;
+                        }
+                    }
+
+                    void* bufferBlock = cbuf_pointer_to_write(circularBuffer);
+                    if (bufferBlock) {
+                        memcpy(bufferBlock, packet->payload, sessionParams.fragmentBytes);
+                        cbufAccumulated++;
+                    } else {
+                        fprintf(stderr, "Circular buffer is full, dropping packet.\n");
+                    }
+                } else if(seqDifference > 1) {
+                    //1 or more packets have been lost
+                    i64 lostPackets = seqDifference - 1;
+                    trace("Warning: Packet loss!");
+                    //Compute silence time from tsDifference
+                } else if(seqDifference < 0) {
+                    //Received a previous packet, ignore
+                    trace("Warning: Previous packet received!");
+                } else {
+                    //Retransmission, ignore
+                    trace("Warning: Retransmission packet received!");
+                }
+
+                inputSequenceNum = header->seq;
+                inputTimeStamp = header->ts;
+            }
+        } else {
+            printf("Timeout has expired.\n");
+        }
+    }
+    }
+
+    //2º bucle
+    //Cuando vea que el buffer está vacio se quita sndCard del set write del select
+
+    //Caso buffer grande: -k3000
 
     /*
     *   Cleanup
     */
+    free(packet);
     cbuf_destroy_buffer(circularBuffer);
     return 0;
 }
 
+
+#if 0
 
 static void execSender(int sockId, struct sockaddr_in* sendAddr, session_params_t session)
 {  
@@ -508,3 +637,5 @@ static void execReceiver(int sockId, struct sockaddr_in* sendAddr, session_param
         printf("Receiver: Sending back the same RTP packet\n"); 
     }
 }
+
+#endif

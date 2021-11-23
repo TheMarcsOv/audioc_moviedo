@@ -2,6 +2,8 @@
 /* audiocArgs.h */
 /*******************************************************/
 
+#pragma once
+
 /* Parses arguments for audioc application */
 
 #include <arpa/inet.h>
