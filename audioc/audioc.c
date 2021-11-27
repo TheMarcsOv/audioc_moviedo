@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <signal.h>
-#include <stdlib.h>
+
 #include <stdbool.h>
 #include <string.h>
 #include <errno.h>
@@ -14,6 +14,8 @@
 #include "../lib/circularBuffer.h"
 #include "../lib/configureSndcard.h"
 #include "../lib/rtp.h"
+
+#include <stdlib.h>
 
 typedef enum payload payload_t;
 typedef struct {
@@ -36,15 +38,16 @@ static void signalHandler(int sigNum)
 //static void execSender(int sockId, struct sockaddr_in* sendAddr, session_params_t session);
 //static void execReceiver(int sockId, struct sockaddr_in* sendAddr, session_params_t session);
 
-static void readAudioFragment(int sndCardFD, rtp_packet_t* packet)
+static void readAudioFragment(int sndCardFD, rtp_packet_t* packet, session_params_t sessionParams)
 {
     u8* fragmentBuffer = (u8*)packet->payload;
     usize fragmentSize = sessionParams.fragmentBytes;
 
     isize readBytes;
+    usize packetSize = sessionParams.fragmentBytes + sizeof(rtp_hdr_t);
     if ((readBytes = read(sndCardFD, fragmentBuffer, fragmentSize)) < 0)
     {
-        panic("Error reading %lu bytes (%lu samples) from sound card file", fragmentSize, samplesPerPacket);
+        panic("Error reading %lu bytes (%lu samples) from sound card file", fragmentSize, packetSize);
     } else if ((usize)readBytes != fragmentSize)
     {
         panic("Incomplete read of %lu bytes (actually read %lu bytes) from sound card file", fragmentSize, readBytes);
@@ -74,7 +77,7 @@ static void sendAudioPacket(rtp_packet_t* packet, int sockId, struct sockaddr_in
     }
 }
 
-static bool validateRTPHeader(rtp_hdr_t* header)
+static bool validateRTPHeader(rtp_hdr_t* header, session_params_t sessionParams)
 {
     if (header->version != RTP_VERSION) {
         return false;
@@ -288,7 +291,7 @@ int main(int argc, char** argv)
             {
                 //We can read from the sound card
                 
-                readAudioFragment(sndCardFD, packet);
+                readAudioFragment(sndCardFD, packet, sessionParams);
                 sendAudioPacket(packet, sockId, &sendAddr, sessionParams, outputSequenceNum, outputTimeStamp);               
 
                 //Once we send it, seq and ts is incremented for the next packet
@@ -311,7 +314,7 @@ int main(int argc, char** argv)
                 rtp_hdr_t* header = &packet->header;
                 ntohRTP(header);
 
-                if (!validateHeader(&packet->header)) {
+                if (!validateRTPHeader(&packet->header, sessionParams)) {
                     fprintf(stderr, "Invalid received RTP packet. Exiting.");
                     exit(1);
                 }
@@ -386,9 +389,14 @@ int main(int argc, char** argv)
         FD_SET(sockId, &readSet); //Network read
         
         FD_ZERO(&writeSet);
-        FD_SET(sndCardFD, &readSet); //Microphone read
-        FD_SET(sockId, &writeSet); //Network write
+        if (cbufAccumulated > 0) {
+            //Only add the sound card to the writing set if the buffer is not empty
+            FD_SET(sndCardFD, &writeSet); //Microphone read
+        }
+        
         // Network writes don't block for a long time
+        //FD_SET(sockId, &writeSet); //Network write
+        
         
         //No timeout in 1st phase
         int res = 0;
@@ -405,10 +413,11 @@ int main(int argc, char** argv)
                 break;
             }
         } else if (res > 0) {
+            //Read operations
             if (FD_ISSET(sndCardFD, &readSet)) {
                 //We can read from the sound card
                 
-                readAudioFragment(sndCardFD, packet);
+                readAudioFragment(sndCardFD, packet, sessionParams);
                 sendAudioPacket(packet, sockId, &sendAddr, sessionParams, outputSequenceNum, outputTimeStamp);               
 
                 //Once we send it, seq and ts is incremented for the next packet
@@ -432,7 +441,7 @@ int main(int argc, char** argv)
                 rtp_hdr_t* header = &packet->header;
                 ntohRTP(header);
 
-                if (!validateHeader(&packet->header)) {
+                if (!validateRTPHeader(&packet->header, sessionParams)) {
                     fprintf(stderr, "Invalid received RTP packet. Exiting.");
                     exit(1);
                 }
@@ -449,6 +458,7 @@ int main(int argc, char** argv)
                     //Received previous samples, ignore
                     //Either last packet was smaller than samplesPerPacket or
                     //this is a retransmission? ignore
+                    trace("Retransmitted fragment according to timestamp.");
                 }
 
                 if (seqDifference == 1) {
@@ -478,6 +488,8 @@ int main(int argc, char** argv)
 
                     void* bufferBlock = cbuf_pointer_to_write(circularBuffer);
                     if (bufferBlock) {
+                        //TODO: it may be possible to eliminate this copy
+                        //by peeking the header and then doing recvfrom() directly on the buffer
                         memcpy(bufferBlock, packet->payload, sessionParams.fragmentBytes);
                         cbufAccumulated++;
                     } else {
@@ -486,8 +498,23 @@ int main(int argc, char** argv)
                 } else if(seqDifference > 1) {
                     //1 or more packets have been lost
                     i64 lostPackets = seqDifference - 1;
-                    trace("Warning: Packet loss!");
+                    
+                    //trace("Warning: Packet loss!");
                     //Compute silence time from tsDifference
+                    i64 lostBlocks = tsDifference / samplesPerPacket;
+                    for (i64 i = 0; i < lostBlocks; i++)
+                    {
+                        void* bufferBlock = cbuf_pointer_to_write(circularBuffer);
+                        if (bufferBlock) {
+                            memcpy(bufferBlock, packet->payload, sessionParams.fragmentBytes);
+                        }
+                        else {
+                            fprintf(stderr, "Circular buffer is full, dropping silences.\n");
+                            break;
+                        }
+                        cbufAccumulated++;
+                    }
+
                 } else if(seqDifference < 0) {
                     //Received a previous packet, ignore
                     trace("Warning: Previous packet received!");
@@ -499,11 +526,33 @@ int main(int argc, char** argv)
                 inputSequenceNum = header->seq;
                 inputTimeStamp = header->ts;
             }
+
+            //Write operations
+            if (FD_ISSET(sndCardFD, &writeSet)) {
+                if (cbuf_has_block(circularBuffer)) {
+                    //We can play audio
+                    void* block = cbuf_pointer_to_read(circularBuffer);
+                    ASSERT(block);
+                    isize n = write(sndCardFD, block, sessionParams.fragmentBytes);
+
+                    if (n < 0) {
+                        printError("Error playing %d byte block at sound card.", sessionParams.fragmentBytes);
+                    } else if (n != sessionParams.fragmentBytes) {
+                        printError("Played a different number of bytes than expected (played %d bytes, expected %d)", 
+                            n, sessionParams.fragmentBytes);
+                    }
+
+                    cbufAccumulated--;
+                } else {
+                    //Empty buffer
+                    trace("Circular buffer is overrun!");
+                }
+            }
         } else {
             printf("Timeout has expired.\n");
         }
     }
-    }
+    
 
     //2º bucle
     //Cuando vea que el buffer está vacio se quita sndCard del set write del select
