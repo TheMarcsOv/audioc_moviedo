@@ -21,10 +21,10 @@ void trace(const char* fmt, ...)
     }
 }
 
-void printError(const char* fmt, ...)
+void _printError(const char* file, int line, const char* fmt, ...)
 {
     int err = errno;
-    fprintf(stderr, "[ERROR]: ");
+    fprintf(stderr, "[ERROR] (at %s line %d): ", file, line);
     va_list list;
     va_start(list, fmt);
     vfprintf(stderr, fmt, list);

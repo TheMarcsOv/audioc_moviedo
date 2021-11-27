@@ -61,5 +61,6 @@ typedef __ssize_t isize;
 
 extern bool DEBUG_TRACES_ENABLED;
 void trace(const char* fmt, ...); 
-void printError(const char* fmt, ...);
+void _printError(const char* file, int line, const char* fmt, ...);
+#define printError(fmt, ...) _printError(__FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define panic(fmt, ...) (printError(fmt, ##__VA_ARGS__), exit(1))
