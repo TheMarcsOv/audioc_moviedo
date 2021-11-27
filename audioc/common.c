@@ -8,6 +8,20 @@
 bool DEBUG_TRACES_ENABLED = 0;
 
 //Prints a debug message formatted by fmt and its arguments.
+//Does not add new line
+//Only prints in verbose mode, when DEBUG_TRACES_ENABLED = 1
+void verboseInfo(const char* fmt, ...)
+{
+    if (DEBUG_TRACES_ENABLED) {
+        va_list list;
+        va_start(list, fmt);
+        vfprintf(stderr, fmt, list);
+        va_end(list);
+    }
+}
+
+//Prints a debug message formatted by fmt and its arguments.
+//Adds [DEBUG]: heading and a new line 
 //Only prints in verbose mode, when DEBUG_TRACES_ENABLED = 1
 void trace(const char* fmt, ...)
 {
@@ -21,6 +35,8 @@ void trace(const char* fmt, ...)
     }
 }
 
+//Prints an error message formatted by fmt and its arguments.
+//Adds [DEBUG]: heading, new line a line with errno
 void printError(const char* fmt, ...)
 {
     int err = errno;

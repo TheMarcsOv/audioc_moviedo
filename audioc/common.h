@@ -60,6 +60,7 @@ typedef __ssize_t isize;
  */
 
 extern bool DEBUG_TRACES_ENABLED;
+void verboseInfo(const char* fmt, ...);
 void trace(const char* fmt, ...); 
 void printError(const char* fmt, ...);
 #define panic(fmt, ...) (printError(fmt, ##__VA_ARGS__), exit(1))
