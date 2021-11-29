@@ -73,7 +73,7 @@ static void sendAudioPacket(rtp_packet_t* packet, int sockId, struct sockaddr_in
         panic("sendto error");
     } else {
         //trace("Packet with ts=%lu sent to network", outputTimeStamp); 
-        printf("."); fflush(stdout); 
+        verboseInfo(".");
     }
 }
 
@@ -88,6 +88,19 @@ static bool validateRTPHeader(rtp_hdr_t* header, session_params_t sessionParams)
         return false;
     }
     return true;
+}
+
+static bool pushSilence(void* cbuf, usize fragmentSize, isize *outCbufCount)
+{
+    void* bufferBlock = cbuf_pointer_to_write(cbuf);
+    if (bufferBlock) {
+        //TODO: Generate white noise instead
+        //Advanced: interpolate previous audio?
+        memset(bufferBlock, 0, fragmentSize);
+        (*outCbufCount)++;
+        return true;
+    }
+    return false;
 }
 
 int main(int argc, char** argv)
@@ -183,8 +196,7 @@ int main(int argc, char** argv)
     /*
     *   Circular buffer
     */
-    //TODO: fill from bufferingTime
-    //bufferingTime += 200; // for 
+
     int bufferingBytes = bufferingTime * rate * channelNumber * bytesPerSample / 1000;
     int bufferingBlocks = bufferingBytes / requestedFragmentSize;
     
@@ -194,14 +206,6 @@ int main(int argc, char** argv)
     trace("Num. blocks in cbuf: %d, buffer block threshold: %d\n", bufferBlockCapacity, bufferingBlocks);
     
     void* circularBuffer = cbuf_create_buffer(bufferBlockCapacity, requestedFragmentSize);
-    
-    /*
-    *   Multicast socket configuration
-    */
-
-    //TODO: support for local ip, non-multicast for testing
-
-    //MCast packet test
 
     /*
     *   Multicast socket configuration
@@ -342,21 +346,24 @@ int main(int argc, char** argv)
                             trace("Silence in buffering phase!");
                             continue;
                         }
-
-                        void* bufferBlock = cbuf_pointer_to_write(circularBuffer);
-                        if (bufferBlock) {
-                            memcpy(bufferBlock, packet->payload, sessionParams.fragmentBytes);
-                            cbufAccumulated++;
-                        } else {
-                            fprintf(stderr, "Circular buffer is full, dropping packet.\n");
-                        }
                     } else {
                         trace("Warning: Unexpected sequence number received in buffering phase!");
                     }
-
-                    inputSequenceNum = header->seq;
-                    inputTimeStamp = header->ts;
                 }
+
+                void* bufferBlock = cbuf_pointer_to_write(circularBuffer);
+                if (bufferBlock) {
+                    memcpy(bufferBlock, packet->payload, sessionParams.fragmentBytes);
+                    cbufAccumulated++;
+                } else {
+                    fprintf(stderr, "Circular buffer is full, dropping packet.\n");
+                }
+                
+
+                verboseInfo("-");
+
+                inputSequenceNum = header->seq;
+                inputTimeStamp = header->ts;
             }
 
         } else {
@@ -366,23 +373,26 @@ int main(int argc, char** argv)
     
     trace("Finished buffering phase.");
 
-#if 0
-    //Play out the samples
-    for (int i = 0; i < cbufAccumulated; i++) {
-        if (cbuf_has_block(circularBuffer)) {
-            u8* block = cbuf_pointer_to_read(circularBuffer);
-            ASSERT(block);
-            printf("*"); fflush(stdout);
-            write(sndCardFD, block, sessionParams.fragmentBytes);
-        }
-    }
-#endif
-
+    // 2nd loop
     while (1) {
         memset(packet, 0, expectedPacketSize);
 
-        timeout.tv_sec = 10;
-        timeout.tv_usec = 0;
+        //Estimate time until sound card depletion - 10ms (for safety)
+        //  T = remaining in sound card (ms) + remaining in buffer (ms) - 10 ms
+        i32 bytesInCard = 0;
+
+        if (ioctl(sndCardFD, SNDCTL_DSP_GETODELAY, &bytesInCard) < 0)
+        {
+            panic("Error calling ioctl SNDCTL_DSP_GETODELAY");
+        }
+
+        float timeInBuffer = cbufAccumulated * samplesPerPacket * 1000.f / rate;  
+        float timeInCard = (bytesInCard / bytesPerSample) * 1000.f / rate;  
+        float remainingTime = MIN(timeInBuffer + timeInCard - 10.f, 0.f);
+        i64 remUSecs = (i64) (remainingTime * 1000.f);
+
+        timeout.tv_sec = remUSecs / 1000000;
+        timeout.tv_usec = remUSecs % 1000000;
 
         FD_ZERO(&readSet);
         FD_SET(sndCardFD, &readSet); //Microphone read
@@ -391,14 +401,13 @@ int main(int argc, char** argv)
         FD_ZERO(&writeSet);
         if (cbufAccumulated > 0) {
             //Only add the sound card to the writing set if the buffer is not empty
-            FD_SET(sndCardFD, &writeSet); //Microphone read
+            FD_SET(sndCardFD, &writeSet); //Microphone write
         }
         
         // Network writes don't block for a long time
         //FD_SET(sockId, &writeSet); //Network write
         
         
-        //No timeout in 1st phase
         int res = 0;
         if ((res = select(FD_SETSIZE, &readSet, &writeSet, NULL, &timeout)) <0) 
         {
@@ -459,6 +468,7 @@ int main(int argc, char** argv)
                     //Either last packet was smaller than samplesPerPacket or
                     //this is a retransmission? ignore
                     trace("Retransmitted fragment according to timestamp.");
+                    continue;
                 }
 
                 if (seqDifference == 1) {
@@ -466,53 +476,43 @@ int main(int argc, char** argv)
                     if (tsDifference == (i64)samplesPerPacket) {
                         //Packet received as expected
                     } else if(tsDifference > (i64)samplesPerPacket) {
-                        trace("Silence in buffering phase!");
                         //Samples have been skipped (not sent, no loss occured), we need to introduce a silence
-                        //Assuming no silences
                         i64 numBlocks = tsDifference / samplesPerPacket;
                         ASSERT(numBlocks > 1);
                         i64 numSilenceBlocks = numBlocks - 1;
                         for (i64 i = 0; i < numSilenceBlocks; i++)
                         {
-                            void* bufferBlock = cbuf_pointer_to_write(circularBuffer);
-                            if (bufferBlock) {
-                                memcpy(bufferBlock, packet->payload, sessionParams.fragmentBytes);
-                            }
-                            else {
+                            if (!pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated)) {
                                 fprintf(stderr, "Circular buffer is full, dropping silences.\n");
                                 break;
                             }
-                            cbufAccumulated++;
+                            verboseInfo("~");
                         }
                     }
 
-                    void* bufferBlock = cbuf_pointer_to_write(circularBuffer);
-                    if (bufferBlock) {
-                        //TODO: it may be possible to eliminate this copy
-                        //by peeking the header and then doing recvfrom() directly on the buffer
-                        memcpy(bufferBlock, packet->payload, sessionParams.fragmentBytes);
-                        cbufAccumulated++;
-                    } else {
-                        fprintf(stderr, "Circular buffer is full, dropping packet.\n");
-                    }
+                    
                 } else if(seqDifference > 1) {
-                    //1 or more packets have been lost
+                    //1 or more packets have been lost (K-1)
                     i64 lostPackets = seqDifference - 1;
                     
                     //trace("Warning: Packet loss!");
-                    //Compute silence time from tsDifference
-                    i64 lostBlocks = tsDifference / samplesPerPacket;
-                    for (i64 i = 0; i < lostBlocks; i++)
-                    {
-                        void* bufferBlock = cbuf_pointer_to_write(circularBuffer);
-                        if (bufferBlock) {
-                            memcpy(bufferBlock, packet->payload, sessionParams.fragmentBytes);
-                        }
-                        else {
+                    //Either lost or silence blocks + the received one (K+J)
+                    i64 pendingBlocks = tsDifference / samplesPerPacket;
+                    //Silence blocks implied in this packet (J)
+                    i64 silenceBlocks = pendingBlocks - lostPackets;
+
+                    for (i64 i = 0; i < pendingBlocks - 1; i++)
+                    {                        
+                        if (!pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated)) {
                             fprintf(stderr, "Circular buffer is full, dropping silences.\n");
                             break;
                         }
-                        cbufAccumulated++;
+                        //We assume the lost blocks come first
+                        if (i < lostPackets) {
+                            verboseInfo("x");
+                        } else {
+                            verboseInfo("~");
+                         }
                     }
 
                 } else if(seqDifference < 0) {
@@ -522,6 +522,19 @@ int main(int argc, char** argv)
                     //Retransmission, ignore
                     trace("Warning: Retransmission packet received!");
                 }
+
+                //Add the samples we just received
+                void* bufferBlock = cbuf_pointer_to_write(circularBuffer);
+                if (bufferBlock) {
+                    //TODO: it may be possible to eliminate this copy
+                    //by peeking the header and then doing recvfrom() directly on the buffer
+                    memcpy(bufferBlock, packet->payload, sessionParams.fragmentBytes);
+                    cbufAccumulated++;
+                } else {
+                    fprintf(stderr, "Circular buffer is full, dropping packet.\n");
+                }
+
+                verboseInfo("+");
 
                 inputSequenceNum = header->seq;
                 inputTimeStamp = header->ts;
@@ -549,7 +562,11 @@ int main(int argc, char** argv)
                 }
             }
         } else {
-            printf("Timeout has expired.\n");
+            ASSERT(pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated)); //If the buffer is somehow full something has gone wrong
+            //Increment input counters as if it arrived correctly 
+            inputSequenceNum++;
+            inputTimeStamp += samplesPerPacket;
+            verboseInfo("t");
         }
     }
     
@@ -566,125 +583,3 @@ int main(int argc, char** argv)
     cbuf_destroy_buffer(circularBuffer);
     return 0;
 }
-
-
-#if 0
-
-static void execSender(int sockId, struct sockaddr_in* sendAddr, session_params_t session)
-{  
-    char sendBuffer[MAX_PACKET_SIZE];
-    char recvBuffer[MAX_PACKET_SIZE];
-
-    ZERO_ARRAY(sendBuffer);
-    const size_t expectedPacketSize = session.fragmentBytes + sizeof(rtp_hdr_t);
-
-    rtp_packet_t* packet = (rtp_packet_t*) sendBuffer;
-    packet->header = (rtp_hdr_t) {
-        .version = RTP_VERSION,
-        .pt = session.pt,
-        .ssrc = session.ssrc,
-        .seq = 0, //TODO: make it random
-        .ts = 0, //TODO: make it random for the initial value
-    };
-
-    trace("RTP Header to send:\n");
-    printRTPHeader(&packet->header);
-
-    htonRTP(&packet->header);
-
-    //Test Audio samples
-    ASSERT(session.pt == L16_1);
-    const size_t numSamples = session.fragmentBytes / session.bytesPerSample;
-    i16* audioBuf = (i16*)packet->payload;
-    usize msgSize = numSamples * sizeof(i16) + sizeof(rtp_hdr_t);
-    ASSERT(msgSize <= expectedPacketSize);
-
-    for (size_t i = 0; i < numSamples; i++)
-    {
-        //To test endianness
-        audioBuf[i] = htons(i + 0xf00); //Convert host (LE) -> AFMT_S16_BE 
-    }    
-
-    isize result;
-    /* Using sendto to send information. Since I've bind the socket, the local (source) port of the packet is fixed. In the rem structure I set the remote (destination) address and port */ 
-    if ( (result = sendto(sockId, sendBuffer, msgSize, /* flags */ 0, (struct sockaddr *)sendAddr, sizeof(struct sockaddr_in)) )<0) {
-        panic("sendto error");
-    } else {
-        trace("Sender: Using sendto to send data to multicast destination"); 
-    }
-
-    struct sockaddr_in remoteSAddr = {0}; 
-    socklen_t sockAddrInLength = sizeof (struct sockaddr_in); /* remember always to set the size of the rem variable in from_len */	
-    if ((result = recvfrom(sockId, recvBuffer, expectedPacketSize, 0, (struct sockaddr *) &remoteSAddr, &sockAddrInLength)) < 0) {
-        panic("recvfrom error\n");
-    } else {
-        char ipBuf[64];
-        const char* ip = inet_ntop(AF_INET, &remoteSAddr.sin_addr, ipBuf, sizeof(ipBuf));
-        trace("Received message from %s. Size: %d bytes\n", ip, result);
-
-        ASSERT(result == (isize)expectedPacketSize);
-        rtp_hdr_t* header = (rtp_hdr_t*)recvBuffer;
-        ntohRTP(header);
-        printRTPHeader(header);
-    }
-}
-
-static void execReceiver(int sockId, struct sockaddr_in* sendAddr, session_params_t session)
-{
-    /* Using sendto to send information. Since I've bound the socket, the local (source)
-        port of the packet is fixed. In the rem structure I set the remote (destination) address and port */ 
-    char recvBuffer[MAX_PACKET_SIZE];
-    isize result;
-    ASSERT(session.pt == L16_1);
-
-    const size_t expectedPacketSize = session.fragmentBytes + sizeof(rtp_hdr_t);
-
-    struct sockaddr_in remoteSAddr = {0}; 
-    socklen_t sockAddrInLength = sizeof (struct sockaddr_in); /* remember always to set the size of the rem variable in from_len */	
-    
-    if ((result = recvfrom(sockId, recvBuffer, expectedPacketSize, 0, (struct sockaddr *) &remoteSAddr, &sockAddrInLength)) < 0) {
-        panic("recvfrom error\n");
-    }
-
-    char ipBuf[64];
-    const char* ip = inet_ntop(AF_INET, &remoteSAddr.sin_addr, ipBuf, sizeof(ipBuf));
-    printf("RTP message from %s. Size: %ld bytes, expected= %ld\n", ip, result, expectedPacketSize);
-
-    //TODO: make this more robust
-    ASSERT(result == (isize)expectedPacketSize);
-    rtp_packet_t* packet = (rtp_packet_t*)recvBuffer;
-    ntohRTP(&packet->header);
-    printRTPHeader(&packet->header);
-
-    i32 remainingBytes = result - sizeof(rtp_hdr_t);
-    ASSERT(remainingBytes == (i32)session.fragmentBytes);
-    i16* samples = (i16*)packet->payload; 
-    //Check samples
-    size_t nSamples = session.fragmentBytes / session.bytesPerSample;
-    bool validSamples = true;
-    for (size_t i = 0; i < nSamples; i++)
-    {
-        if (ntohs(samples[i]) != i + 0xf00) {
-            validSamples = false;
-            break;
-        }
-    }
-    if (validSamples) trace("Received samples are valid!");
-    else trace("Received samples are invalid!!!");
-
-    packet->header.ssrc = session.ssrc;
-    packet->header.seq += 1;
-    
-    trace("RTP Header to send back:");
-    printRTPHeader(&packet->header);
-
-    htonRTP(&packet->header);
-
-    if ( (result = sendto(sockId, recvBuffer, expectedPacketSize, 0, (struct sockaddr*)sendAddr, sizeof(struct sockaddr_in)) )<0) {
-        panic("sendto error\n");
-    } else {
-        printf("Receiver: Sending back the same RTP packet\n"); 
-    }
-}
-
-#endif
