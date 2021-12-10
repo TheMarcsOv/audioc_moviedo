@@ -4,9 +4,11 @@
 #include <stdbool.h>
 #include <string.h>
 #include <errno.h>
+#include <time.h>
 #include <unistd.h>
+#include <math.h>
 #include <sys/soundcard.h>
-
+#include <sys/ioctl.h>
 
 #include "common.h"
 #include "audiocArgs.h"
@@ -97,7 +99,7 @@ static bool pushSilence(void* cbuf, usize fragmentSize, isize *outCbufCount)
         //TODO: Generate white noise instead
         //Advanced: interpolate previous audio?
         memset(bufferBlock, 0, fragmentSize);
-        (*outCbufCount)++;
+        *outCbufCount = (*outCbufCount) + 1;
         return true;
     }
     return false;
@@ -105,6 +107,8 @@ static bool pushSilence(void* cbuf, usize fragmentSize, isize *outCbufCount)
 
 int main(int argc, char** argv)
 {
+    srand(time(NULL));
+
     /* Obtains values from the command line - or default values otherwise */
     struct in_addr multicastIp;
     u32 ssrc;
@@ -198,8 +202,10 @@ int main(int argc, char** argv)
     */
 
     int bufferingBytes = bufferingTime * rate * channelNumber * bytesPerSample / 1000;
-    int bufferingBlocks = bufferingBytes / requestedFragmentSize;
+    int bufferingBlocks = (int)floor((float)bufferingBytes / (float)requestedFragmentSize);
     
+    trace("Bytes for buffering: %d", bufferingBytes);
+
     int bufferByteCapacity = bufferingBytes + (200 * rate * channelNumber * bytesPerSample / 1000);
     int bufferBlockCapacity = bufferByteCapacity / requestedFragmentSize;
 
@@ -344,7 +350,6 @@ int main(int argc, char** argv)
                         //Packet received as expected
                         if(tsDifference > (i64)samplesPerPacket) {
                             trace("Silence in buffering phase!");
-                            continue;
                         }
                     } else {
                         trace("Warning: Unexpected sequence number received in buffering phase!");
@@ -360,7 +365,7 @@ int main(int argc, char** argv)
                 }
                 
 
-                verboseInfo("-");
+                verboseInfo("+");
 
                 inputSequenceNum = header->seq;
                 inputTimeStamp = header->ts;
@@ -386,13 +391,15 @@ int main(int argc, char** argv)
             panic("Error calling ioctl SNDCTL_DSP_GETODELAY");
         }
 
-        float timeInBuffer = cbufAccumulated * samplesPerPacket * 1000.f / rate;  
-        float timeInCard = (bytesInCard / bytesPerSample) * 1000.f / rate;  
-        float remainingTime = MIN(timeInBuffer + timeInCard - 10.f, 0.f);
-        i64 remUSecs = (i64) (remainingTime * 1000.f);
+        float timeInBuffer = cbufAccumulated * samplesPerPacket * 1000.f / rate; //ms
+        float timeInCard = (bytesInCard / bytesPerSample) * 1000.f / rate; //ms
+        float remainingTime = MAX(timeInBuffer + timeInCard - 10.f, 0.f); //ms
+        i64 remUSecs = (i64) (remainingTime * 1000.f) + 1; //us
 
         timeout.tv_sec = remUSecs / 1000000;
         timeout.tv_usec = remUSecs % 1000000;
+        //timeout.tv_sec = 10;
+        //timeout.tv_usec = 0;
 
         FD_ZERO(&readSet);
         FD_SET(sndCardFD, &readSet); //Microphone read
@@ -422,12 +429,39 @@ int main(int argc, char** argv)
                 break;
             }
         } else if (res > 0) {
+
+            //Write operations
+            if (FD_ISSET(sndCardFD, &writeSet)) {
+
+                if (cbuf_has_block(circularBuffer)) {
+                    //We can play audio
+                    void* block = cbuf_pointer_to_read(circularBuffer);
+                    ASSERT(block);
+                    isize n = write(sndCardFD, block, sessionParams.fragmentBytes);
+
+                    if (n < 0) {
+                        printError("Error playing %d byte block at sound card.", sessionParams.fragmentBytes);
+                    } else if (n != sessionParams.fragmentBytes) {
+                        printError("Played a different number of bytes than expected (played %d bytes, expected %d)", 
+                            n, sessionParams.fragmentBytes);
+                    }
+
+                    verboseInfo("-");
+                    cbufAccumulated--;
+                } else {
+                    //Empty buffer
+                    trace("Circular buffer is overrun!");
+                }
+            }
+
+            //trace("Buffer blocks: %d", cbufAccumulated);
             //Read operations
             if (FD_ISSET(sndCardFD, &readSet)) {
                 //We can read from the sound card
                 
                 readAudioFragment(sndCardFD, packet, sessionParams);
-                sendAudioPacket(packet, sockId, &sendAddr, sessionParams, outputSequenceNum, outputTimeStamp);               
+                //Simulate packet loss       
+                sendAudioPacket(packet, sockId, &sendAddr, sessionParams, outputSequenceNum, outputTimeStamp);  
 
                 //Once we send it, seq and ts is incremented for the next packet
                 outputSequenceNum += 1;
@@ -446,6 +480,9 @@ int main(int argc, char** argv)
                     panic("Expected to receive full sized packet!");
                 }
 
+                //bool drop = (rand() % 5) == 0;
+                //if (drop) continue;
+
                 ASSERT(result == (isize)expectedPacketSize);
                 rtp_hdr_t* header = &packet->header;
                 ntohRTP(header);
@@ -455,23 +492,23 @@ int main(int argc, char** argv)
                     exit(1);
                 }
                    
-                i32 seqDifference = seqNumDifference(inputSequenceNum, header->seq);
-                i64 tsDifference = timestampDifference(inputTimeStamp, header->ts);
+                i32 seqDifference = (i32)header->seq - (i32)inputSequenceNum;
+                i64 tsDifference = (i64)header->ts - (i64)inputTimeStamp;
 
                 if (tsDifference % samplesPerPacket != 0) {
                     fprintf(stderr, "Mismatched packet sizes, exiting program.");
                     exit(1);
                 }
 
-                if(tsDifference < 0 || tsDifference > (i64)samplesPerPacket) {
+                bool discard = false;
+
+                if(seqDifference < 1 || tsDifference < (i64)samplesPerPacket) {
                     //Received previous samples, ignore
                     //Either last packet was smaller than samplesPerPacket or
                     //this is a retransmission? ignore
-                    trace("Retransmitted fragment according to timestamp.");
-                    continue;
-                }
-
-                if (seqDifference == 1) {
+                    trace("Retransmitted fragment.");
+                    discard = true;
+                }else if (seqDifference == 1) {
                     //Packet received as expected
                     if (tsDifference == (i64)samplesPerPacket) {
                         //Packet received as expected
@@ -479,86 +516,72 @@ int main(int argc, char** argv)
                         //Samples have been skipped (not sent, no loss occured), we need to introduce a silence
                         i64 numBlocks = tsDifference / samplesPerPacket;
                         ASSERT(numBlocks > 1);
-                        i64 numSilenceBlocks = numBlocks - 1;
+                        i64 freeBlocks = bufferBlockCapacity - cbufAccumulated;
+                        i64 numSilenceBlocks = MIN(numBlocks - 1, freeBlocks);
                         for (i64 i = 0; i < numSilenceBlocks; i++)
                         {
                             if (!pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated)) {
                                 fprintf(stderr, "Circular buffer is full, dropping silences.\n");
-                                break;
-                            }
+                            } 
                             verboseInfo("~");
                         }
-                    }
-
-                    
+                    }                    
                 } else if(seqDifference > 1) {
                     //1 or more packets have been lost (K-1)
                     i64 lostPackets = seqDifference - 1;
                     
-                    //trace("Warning: Packet loss!");
+                    // tsDiff = (K+J)*F
                     //Either lost or silence blocks + the received one (K+J)
+                
                     i64 pendingBlocks = tsDifference / samplesPerPacket;
+                    ASSERT(pendingBlocks > lostPackets);
+                    i64 freeBlocks = bufferBlockCapacity - 1 - cbufAccumulated;
+                    i64 silenceBlocks = MAX(0, pendingBlocks - 1);
+                    if (pendingBlocks - 1 < lostPackets)
+                    {
+                        ASSERT(false && "Wrong pendingBlocks");
+                    }
+                    
                     //Silence blocks implied in this packet (J)
-                    i64 silenceBlocks = pendingBlocks - lostPackets;
+                    //i64 silenceBlocks = pendingBlocks - lostPackets;
+                    
 
-                    for (i64 i = 0; i < pendingBlocks - 1; i++)
+                    for (i64 i = 0; i < silenceBlocks; i++)
                     {                        
-                        if (!pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated)) {
-                            fprintf(stderr, "Circular buffer is full, dropping silences.\n");
-                            break;
-                        }
                         //We assume the lost blocks come first
                         if (i < lostPackets) {
                             verboseInfo("x");
                         } else {
                             verboseInfo("~");
-                         }
+                        }
+
+                        if (!pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated)) {
+                            fprintf(stderr, "Circular buffer is full, dropping silences.\n");
+                        }
                     }
 
-                } else if(seqDifference < 0) {
-                    //Received a previous packet, ignore
-                    trace("Warning: Previous packet received!");
-                } else {
+                } else if(seqDifference <= 0) {
                     //Retransmission, ignore
-                    trace("Warning: Retransmission packet received!");
+                    //trace("Warning: Retransmission packet received!");
+                    discard = true;
                 }
 
-                //Add the samples we just received
-                void* bufferBlock = cbuf_pointer_to_write(circularBuffer);
-                if (bufferBlock) {
-                    //TODO: it may be possible to eliminate this copy
-                    //by peeking the header and then doing recvfrom() directly on the buffer
-                    memcpy(bufferBlock, packet->payload, sessionParams.fragmentBytes);
-                    cbufAccumulated++;
-                } else {
-                    fprintf(stderr, "Circular buffer is full, dropping packet.\n");
-                }
-
-                verboseInfo("+");
-
-                inputSequenceNum = header->seq;
-                inputTimeStamp = header->ts;
-            }
-
-            //Write operations
-            if (FD_ISSET(sndCardFD, &writeSet)) {
-                if (cbuf_has_block(circularBuffer)) {
-                    //We can play audio
-                    void* block = cbuf_pointer_to_read(circularBuffer);
-                    ASSERT(block);
-                    isize n = write(sndCardFD, block, sessionParams.fragmentBytes);
-
-                    if (n < 0) {
-                        printError("Error playing %d byte block at sound card.", sessionParams.fragmentBytes);
-                    } else if (n != sessionParams.fragmentBytes) {
-                        printError("Played a different number of bytes than expected (played %d bytes, expected %d)", 
-                            n, sessionParams.fragmentBytes);
+                if (!discard) {
+                    //Add the samples we just received
+                    void* bufferBlock = cbuf_pointer_to_write(circularBuffer);
+                    if (bufferBlock) {
+                        //TODO: it may be possible to eliminate this copy
+                        //by peeking the header and then doing recvfrom() directly on the buffer
+                        memcpy(bufferBlock, packet->payload, sessionParams.fragmentBytes);
+                        cbufAccumulated++;
+                    } else {
+                        fprintf(stderr, "Circular buffer is full, dropping packet.\n");
                     }
 
-                    cbufAccumulated--;
-                } else {
-                    //Empty buffer
-                    trace("Circular buffer is overrun!");
+                    verboseInfo("+");
+                
+                    inputSequenceNum = header->seq;
+                    inputTimeStamp = header->ts;
                 }
             }
         } else {
@@ -570,11 +593,7 @@ int main(int argc, char** argv)
         }
     }
     
-
-    //2º bucle
-    //Cuando vea que el buffer está vacio se quita sndCard del set write del select
-
-    //Caso buffer grande: -k3000
+    
 
     /*
     *   Cleanup

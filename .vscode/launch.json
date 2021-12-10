@@ -9,7 +9,7 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/bin/audioc",
-            "args": ["239.0.1.1", "0", "-c", "-y101", "-k200"],
+            "args": ["239.0.1.1", "10", "-c", "-y101", "-k200"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],
@@ -21,7 +21,8 @@
                     "text": "-enable-pretty-printing",
                     "ignoreFailures": true
                 }
-            ]
+            ],
+            "preLaunchTask": "build"
         }
     ]
 }

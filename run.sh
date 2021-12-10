@@ -1,3 +1,3 @@
 #!/bin/bash
 ./build.sh
-bin/audioc 239.0.1.1 $1 -y101 -k5000 -c
+bin/audioc 239.0.1.1 $1 -k300 -y101 -c
