@@ -506,7 +506,8 @@ int main(int argc, char** argv)
                     //Received previous samples, ignore
                     //Either last packet was smaller than samplesPerPacket or
                     //this is a retransmission? ignore
-                    trace("Retransmitted fragment.");
+                    trace("Re-TX: current(seq=%d, ts=%d), recv(seq=%d, ts=%d)", 
+                        inputSequenceNum, inputTimeStamp, header->seq, header->ts);
                     discard = true;
                 }else if (seqDifference == 1) {
                     //Packet received as expected
