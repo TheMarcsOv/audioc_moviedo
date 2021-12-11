@@ -384,20 +384,20 @@ int main(int argc, char** argv)
 
         //Estimate time until sound card depletion - 10ms (for safety)
         //  T = remaining in sound card (ms) + remaining in buffer (ms) - 10 ms
-        i32 bytesInCard = 0;
 
+        i32 bytesInCard = 0;
         if (ioctl(sndCardFD, SNDCTL_DSP_GETODELAY, &bytesInCard) < 0)
         {
             panic("Error calling ioctl SNDCTL_DSP_GETODELAY");
         }
 
-        float timeInBuffer = cbufAccumulated * samplesPerPacket * 1000.f / rate; //ms
-        float timeInCard = (bytesInCard / bytesPerSample) * 1000.f / rate; //ms
-        float remainingTime = MAX(timeInBuffer + timeInCard - 10.f, 0.f); //ms
+        float timeInBuffer = cbufAccumulated * samplesPerPacket * 1000.f / (float)rate; //ms
+        float timeInCard = (bytesInCard / bytesPerSample) * 1000.f / (float)rate; //ms
+        float remainingTime = MAX(timeInBuffer + timeInCard - 10.f, 1.f); //ms
         i64 remUSecs = (i64) (remainingTime * 1000.f) + 1; //us
 
-        timeout.tv_sec = remUSecs / 1000000;
-        timeout.tv_usec = remUSecs % 1000000;
+        timeout.tv_sec = 0;
+        timeout.tv_usec = remUSecs;
         //timeout.tv_sec = 10;
         //timeout.tv_usec = 0;
 
@@ -414,6 +414,7 @@ int main(int argc, char** argv)
         // Network writes don't block for a long time
         //FD_SET(sockId, &writeSet); //Network write
         
+        printf("Timer(%ld us = %f buffer ms + %f card ms), Acc. Buffer: %ld blocks.\n", remUSecs, timeInBuffer, timeInCard, cbufAccumulated); fflush(stdout);
         
         int res = 0;
         if ((res = select(FD_SETSIZE, &readSet, &writeSet, NULL, &timeout)) <0) 
@@ -506,7 +507,7 @@ int main(int argc, char** argv)
                     //Received previous samples, ignore
                     //Either last packet was smaller than samplesPerPacket or
                     //this is a retransmission? ignore
-                    trace("Re-TX: current(seq=%d, ts=%d), recv(seq=%d, ts=%d)", 
+                    printf("Re-TX: current(seq=%d, ts=%d), recv(seq=%d, ts=%d)\n", 
                         inputSequenceNum, inputTimeStamp, header->seq, header->ts);
                     discard = true;
                 }else if (seqDifference == 1) {
@@ -536,8 +537,9 @@ int main(int argc, char** argv)
                 
                     i64 pendingBlocks = tsDifference / samplesPerPacket;
                     ASSERT(pendingBlocks > lostPackets);
+                    //leave one for the data buffer 
                     i64 freeBlocks = bufferBlockCapacity - 1 - cbufAccumulated;
-                    i64 silenceBlocks = MAX(0, pendingBlocks - 1);
+                    i64 silenceBlocks = MAX(0, MIN(pendingBlocks - 1, freeBlocks));
                     if (pendingBlocks - 1 < lostPackets)
                     {
                         ASSERT(false && "Wrong pendingBlocks");
