@@ -527,7 +527,6 @@ int main(int argc, char** argv)
                     panic("Expected to receive full sized packet!");
                 }
 
-                ASSERT(result == (isize)expectedPacketSize);
                 rtp_hdr_t* header = &packet->header;
                 ntohRTP(header);
 
@@ -635,7 +634,8 @@ int main(int argc, char** argv)
                 }
             }
         } else {
-            ASSERT(pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated)); //If the buffer is somehow full something has gone wrong
+            bool success = pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated);
+            ASSERT(success); //If the buffer is somehow full something has gone wrong
             //Increment input counters as if it arrived correctly 
             g_stats.timeouts++;
             inputSequenceNum++;
