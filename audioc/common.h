@@ -33,27 +33,14 @@ typedef __ssize_t isize;
  * Utility macros 
  */
 
-#define INRANGE(x, min, max) ((x) >= (min) && x < (max))
-#define ABS(x) ((x) < 0 ? -(x) : (x))
-
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
-
-#define ARRAY_COUNT(A) (sizeof(A)/sizeof(A[0]))
-#define ARRAY_COUNT32(A) ((u32)ARRAY_COUNT(A))
 
 #ifdef AC_ASSERTS
 #define ASSERT(X) assert(X)
 #else
 #define ASSERT(X) 
 #endif
-
-//a must be a power of 2
-#define ALIGN_DOWN(x, a) ((x) & ~((a)-1))
-
-#define ZERO_SIZE(ptr, size) memset((ptr), 0, (size)) 
-#define ZERO_STRUCT(STRUCT) ZERO_SIZE(&(STRUCT), sizeof(STRUCT))
-#define ZERO_ARRAY(ARRAY) ZERO_SIZE(ARRAY, sizeof(ARRAY))
 
 /*
  * Common functions

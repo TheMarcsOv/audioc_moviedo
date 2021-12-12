@@ -247,7 +247,7 @@ int main(int argc, char** argv)
 
     int bufferingBytes = bufferingTime * rate * channelNumber * bytesPerSample / 1000;
     //The behavior of audiocTest is to round down the buffering blocks count, so we do it here too
-    int bufferingBlocks = (int)floorf((float)bufferingBytes / (float)requestedFragmentSize);
+    int bufferingBlocks = (int)floor((float)bufferingBytes / (float)requestedFragmentSize);
     
     trace("Bytes for buffering: %d", bufferingBytes);
 
@@ -442,8 +442,8 @@ int main(int argc, char** argv)
         //  T = remaining in sound card (ms) + remaining in buffer (ms) - 10 ms
         float timeInBuffer = cbufAccumulated * samplesPerPacket * 1000.f / (float)rate; //ms
         float timeInCard = (bytesInCard / bytesPerSample) * 1000.f / (float)rate; //ms
-        float remainingTime = MAX(timeInBuffer + timeInCard - 10.f, 1.f); //ms 10.f
-        i64 remUSecs = (i64) (remainingTime * 1000.f) + 1; //us
+        float remainingTime = MAX(timeInBuffer + timeInCard - 10.f, 0.1f); //ms
+        i64 remUSecs = (i64) (remainingTime * 1000.f); //us
 
         timeout.tv_sec = 0;
         timeout.tv_usec = remUSecs;
@@ -555,8 +555,8 @@ int main(int argc, char** argv)
                     //Received previous samples, ignore
                     //Either last packet was smaller than samplesPerPacket or
                     //this is a retransmission? ignore
-                    printf("Re-TX: current(seq=%d, ts=%d), recv(seq=%d, ts=%d)\n", 
-                        inputSequenceNum, inputTimeStamp, header->seq, header->ts);
+                    //printf("Re-TX: current(seq=%d, ts=%d), recv(seq=%d, ts=%d)\n", 
+                    //    inputSequenceNum, inputTimeStamp, header->seq, header->ts);
                     discard = true;
                 }else if (seqDifference == 1) {
                     //Packet received as expected
@@ -597,7 +597,7 @@ int main(int argc, char** argv)
                     
                     //Silence blocks implied in this packet (J)
                     //i64 actualSilenceBlocks = silenceBlocks - lostPackets;
-                    printf("(Lost packet) Seq. dif =%d, lost %ld packets. Pushing %ld silences in total.\n", seqDifference, lostPackets, silenceBlocks);
+                    //printf("(Lost packet) Seq. dif =%d, lost %ld packets. Pushing %ld silences in total.\n", seqDifference, lostPackets, silenceBlocks);
 
                     for (i64 i = 0; i < silenceBlocks; i++)
                     {                        
@@ -641,7 +641,10 @@ int main(int argc, char** argv)
             }
         } else {
             bool success = pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated);
-            ASSERT(success); //If the buffer is somehow full something has gone wrong
+            //If the buffer is somehow full something has gone wrong
+            if (!success){
+                fprintf(stderr, "Circular buffer is full, dropping silence.\n");
+            }
             //Increment input counters as if it arrived correctly 
             g_stats.timeouts++;
             inputSequenceNum++;
