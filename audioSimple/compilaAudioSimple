@@ -1,1 +1,0 @@
-gcc -Wall -Wextra -g -lm -o audioSimple ../lib/configureSndcard.c audioSimpleArgs.c audioSimple.c
