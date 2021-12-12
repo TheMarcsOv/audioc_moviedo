@@ -7,6 +7,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <math.h>
+#include <sys/time.h>
 #include <sys/soundcard.h>
 #include <sys/ioctl.h>
 
@@ -25,20 +26,59 @@ typedef struct {
     u8 pt;
     u32 fragmentBytes;
     u32 bytesPerSample;
+    i32 sampleRate;
 } session_params_t;
+
+
+typedef struct {
+    i32 packetsPlayed;
+    i32 silencesPlayed;
+    i32 timeouts; //Technically count as silences
+    i32 lostPackets;
+    i32 packetsRecorded;
+    struct timeval playbackStart;
+} statistics_t;
+
+static session_params_t sessionParams = {};
+static statistics_t g_stats = {};
 
 static void signalHandler(int sigNum)
 {
 	(void) sigNum;
-    //TODO: handle signal:
-    //Print time
-    //Close everything ......
+
+    struct timeval stopTime;
+    if(gettimeofday(&stopTime, NULL) != 0) {
+        panic("Could not get current time from gettimeofday()!");
+    }
+
     printf("Interrupted audioc\n");
+
+    printf("Played packets: %d\n", g_stats.packetsPlayed);
+    printf("Silent packets: %d\n", g_stats.lostPackets + g_stats.silencesPlayed + g_stats.timeouts);
+    printf("\tDue to detected silence (~): %d\n", g_stats.silencesPlayed);
+    printf("\tDue to packet loss (x): %d\n", g_stats.lostPackets);
+    printf("\tDue to timeouts (t): %d\n", g_stats.timeouts);
+
+    if (g_stats.packetsPlayed > 0) {
+        //in us
+        i64 start = g_stats.playbackStart.tv_usec + g_stats.playbackStart.tv_sec * 1000000;
+        i64 end = stopTime.tv_usec + stopTime.tv_sec * 1000000;
+
+        i64 diff = end - start;
+        double theoreticalPlayback = g_stats.packetsPlayed * sessionParams.fragmentBytes / 
+            (double)(sessionParams.bytesPerSample * sessionParams.sampleRate);
+        
+        printf("Total playback time (theoretical): %f seconds.\n", theoreticalPlayback);
+        printf("Total playback time (wall clock): %f seconds.\n", (double)diff / 1e6);
+    } else {
+        printf("No audio was played.\n");
+    }
+    
+    printf("Recorded (and sent) packets: %d\n", g_stats.packetsRecorded);
+
+    
     exit(0);
 }
-
-//static void execSender(int sockId, struct sockaddr_in* sendAddr, session_params_t session);
-//static void execReceiver(int sockId, struct sockaddr_in* sendAddr, session_params_t session);
 
 static void readAudioFragment(int sndCardFD, rtp_packet_t* packet, session_params_t sessionParams)
 {
@@ -56,14 +96,14 @@ static void readAudioFragment(int sndCardFD, rtp_packet_t* packet, session_param
     }
 }
 
-static void sendAudioPacket(rtp_packet_t* packet, int sockId, struct sockaddr_in* sendAddr, session_params_t sessionParams, u16 outputSequenceNum, u32 outputTimeStamp)
+static void sendAudioPacket(rtp_packet_t* packet, int sockId, struct sockaddr_in* sendAddr, session_params_t sessionParams, u16 seq, u32 ts)
 {
     packet->header = (rtp_hdr_t) {
         .version = RTP_VERSION,
         .pt = sessionParams.pt,
         .ssrc = sessionParams.ssrc,
-        .seq = outputSequenceNum, 
-        .ts = outputTimeStamp, //TODO: make it random for the initial value
+        .seq = seq, 
+        .ts = ts, 
     };
 
     htonRTP(&packet->header);
@@ -74,7 +114,6 @@ static void sendAudioPacket(rtp_packet_t* packet, int sockId, struct sockaddr_in
     if ( (result = sendto(sockId, packet, packetSize, /* flags */ 0, (struct sockaddr *)sendAddr, sizeof(struct sockaddr_in)) )<0) {
         panic("sendto error");
     } else {
-        //trace("Packet with ts=%lu sent to network", outputTimeStamp); 
         verboseInfo(".");
     }
 }
@@ -151,11 +190,9 @@ int main(int argc, char** argv)
     /*
     *   Sound card configuration
     */
-    //Calculate from parameters
-    // secs * Hz
 
     int rate = 8000;
-    int channelNumber = 1; //Only support mono
+    int channelNumber = 1; //We only support mono
     
     int sndCardFmt;
     int bytesPerSample;
@@ -175,6 +212,7 @@ int main(int argc, char** argv)
         bytesPerSample = 1;
         break;
     }
+
     trace("BPSample: %d bytes, rate=%d Hz", bytesPerSample, rate);
     // In bytes
     int requestedFragmentSize = packetDuration * rate * channelNumber * bytesPerSample / 1000;
@@ -189,23 +227,25 @@ int main(int argc, char** argv)
     float fragmentDuration = requestedFragmentSize * 1000 / (rate * channelNumber * bytesPerSample); //in ms
     trace("Obtained fragment size: %d. Obtained sound fragment duration: %.3f.", requestedFragmentSize, fragmentDuration);
 
-    session_params_t sessionParams = {
+    sessionParams = (session_params_t) {
         .ssrc = ssrc,
         .pt = payload,
         .fragmentBytes = requestedFragmentSize, 
         .bytesPerSample = bytesPerSample,
-    };
-    
+        .sampleRate = rate,
+    };    
 
     /*
     *   Circular buffer
     */
 
     int bufferingBytes = bufferingTime * rate * channelNumber * bytesPerSample / 1000;
-    int bufferingBlocks = (int)floor((float)bufferingBytes / (float)requestedFragmentSize);
+    //The behavior of audiocTest is to round down the buffering blocks count, so we do it here too
+    int bufferingBlocks = (int)floorf((float)bufferingBytes / (float)requestedFragmentSize);
     
     trace("Bytes for buffering: %d", bufferingBytes);
 
+    // +200ms for safety
     int bufferByteCapacity = bufferingBytes + (200 * rate * channelNumber * bytesPerSample / 1000);
     int bufferBlockCapacity = bufferByteCapacity / requestedFragmentSize;
 
@@ -251,7 +291,8 @@ int main(int argc, char** argv)
     }
 
     usize expectedPacketSize = sessionParams.fragmentBytes + sizeof(rtp_hdr_t);
-    usize samplesPerPacket = sessionParams.fragmentBytes / sessionParams.bytesPerSample;
+    const usize samplesPerPacket = sessionParams.fragmentBytes / sessionParams.bytesPerSample;
+    trace("Samples per packet: %d\n", samplesPerPacket);
     rtp_packet_t* packet = (rtp_packet_t*) malloc(expectedPacketSize);
     struct timeval timeout;
     fd_set readSet, writeSet;
@@ -263,6 +304,8 @@ int main(int argc, char** argv)
 
     u16 outputSequenceNum = 0; //TODO: make it random
     u32 outputTimeStamp = 0; //TODO: make it random
+
+    //1st phase
 
     //TODO: Measure time
     isize cbufAccumulated = 0; //in blocks
@@ -277,9 +320,8 @@ int main(int argc, char** argv)
         FD_SET(sndCardFD, &readSet); //Microphone read
         FD_SET(sockId, &readSet); //Network read
         
-        FD_ZERO(&writeSet);
-        // FD_SET(sockId, &writeSet); //Network write
         // Network writes don't block for a long time
+        FD_ZERO(&writeSet);
         
         //No timeout in 1st phase
         int res = 0;
@@ -307,6 +349,8 @@ int main(int argc, char** argv)
                 //Once we send it, seq and ts is incremented for the next packet
                 outputSequenceNum += 1;
                 outputTimeStamp += samplesPerPacket;
+
+                g_stats.packetsRecorded++;
             }
             if (FD_ISSET(sockId, &readSet)) {
                 isize result;
@@ -372,18 +416,15 @@ int main(int argc, char** argv)
             }
 
         } else {
-            printf("Timeout has expired.\n");
+            printf("Warning: Timeout has expired in buffering phase.\n");
         }
     }
     
-    trace("Finished buffering phase.");
+    //trace("Finished buffering phase.");
 
     // 2nd loop
     while (1) {
         memset(packet, 0, expectedPacketSize);
-
-        //Estimate time until sound card depletion - 10ms (for safety)
-        //  T = remaining in sound card (ms) + remaining in buffer (ms) - 10 ms
 
         i32 bytesInCard = 0;
         if (ioctl(sndCardFD, SNDCTL_DSP_GETODELAY, &bytesInCard) < 0)
@@ -391,15 +432,15 @@ int main(int argc, char** argv)
             panic("Error calling ioctl SNDCTL_DSP_GETODELAY");
         }
 
+        //Estimate time until sound card depletion - 10ms (for safety)
+        //  T = remaining in sound card (ms) + remaining in buffer (ms) - 10 ms
         float timeInBuffer = cbufAccumulated * samplesPerPacket * 1000.f / (float)rate; //ms
         float timeInCard = (bytesInCard / bytesPerSample) * 1000.f / (float)rate; //ms
-        float remainingTime = MAX(timeInBuffer + timeInCard - 10.f, 1.f); //ms
+        float remainingTime = MAX(timeInBuffer + timeInCard - 5.f, 0.f); //ms 10.f
         i64 remUSecs = (i64) (remainingTime * 1000.f) + 1; //us
 
         timeout.tv_sec = 0;
         timeout.tv_usec = remUSecs;
-        //timeout.tv_sec = 10;
-        //timeout.tv_usec = 0;
 
         FD_ZERO(&readSet);
         FD_SET(sndCardFD, &readSet); //Microphone read
@@ -411,10 +452,7 @@ int main(int argc, char** argv)
             FD_SET(sndCardFD, &writeSet); //Microphone write
         }
         
-        // Network writes don't block for a long time
-        //FD_SET(sockId, &writeSet); //Network write
-        
-        printf("Timer(%ld us = %f buffer ms + %f card ms), Acc. Buffer: %ld blocks.\n", remUSecs, timeInBuffer, timeInCard, cbufAccumulated); fflush(stdout);
+        //printf("Timer(%ld us = %f buffer ms + %f card ms), Acc. Buffer: %ld blocks.\n", remUSecs, timeInBuffer, timeInCard, cbufAccumulated);
         
         int res = 0;
         if ((res = select(FD_SETSIZE, &readSet, &writeSet, NULL, &timeout)) <0) 
@@ -447,6 +485,13 @@ int main(int argc, char** argv)
                             n, sessionParams.fragmentBytes);
                     }
 
+                    if (g_stats.packetsPlayed == 0) {
+                        if(gettimeofday(&g_stats.playbackStart, NULL) != 0) {
+                            panic("Could not get current time from gettimeofday()!");
+                        }
+                    }
+
+                    g_stats.packetsPlayed++;
                     verboseInfo("-");
                     cbufAccumulated--;
                 } else {
@@ -467,6 +512,8 @@ int main(int argc, char** argv)
                 //Once we send it, seq and ts is incremented for the next packet
                 outputSequenceNum += 1;
                 outputTimeStamp += samplesPerPacket;
+
+                g_stats.packetsRecorded++;
             }
             if (FD_ISSET(sockId, &readSet)) {
                 
@@ -477,12 +524,8 @@ int main(int argc, char** argv)
                 if ((result = recvfrom(sockId, packet, expectedPacketSize, 0, (struct sockaddr *) &remoteSAddr, &sockAddrInLength)) < 0) {
                     panic("recvfrom error");
                 } else if ((usize)result != expectedPacketSize) {
-                    //TODO: Fix if this happens
                     panic("Expected to receive full sized packet!");
                 }
-
-                //bool drop = (rand() % 5) == 0;
-                //if (drop) continue;
 
                 ASSERT(result == (isize)expectedPacketSize);
                 rtp_hdr_t* header = &packet->header;
@@ -493,8 +536,8 @@ int main(int argc, char** argv)
                     exit(1);
                 }
                    
-                i32 seqDifference = (i32)header->seq - (i32)inputSequenceNum;
-                i64 tsDifference = (i64)header->ts - (i64)inputTimeStamp;
+                i32 seqDifference = seqNumDifference(inputSequenceNum, header->seq);
+                i64 tsDifference = timestampDifference(inputTimeStamp, header->ts);
 
                 if (tsDifference % samplesPerPacket != 0) {
                     fprintf(stderr, "Mismatched packet sizes, exiting program.");
@@ -520,11 +563,13 @@ int main(int argc, char** argv)
                         ASSERT(numBlocks > 1);
                         i64 freeBlocks = bufferBlockCapacity - cbufAccumulated;
                         i64 numSilenceBlocks = MIN(numBlocks - 1, freeBlocks);
+                        printf("(Silence packet) Pushing %ld silences.\n", numSilenceBlocks);
                         for (i64 i = 0; i < numSilenceBlocks; i++)
                         {
                             if (!pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated)) {
                                 fprintf(stderr, "Circular buffer is full, dropping silences.\n");
                             } 
+                            g_stats.silencesPlayed++;
                             verboseInfo("~");
                         }
                     }                    
@@ -534,32 +579,34 @@ int main(int argc, char** argv)
                     
                     // tsDiff = (K+J)*F
                     //Either lost or silence blocks + the received one (K+J)
-                
                     i64 pendingBlocks = tsDifference / samplesPerPacket;
                     ASSERT(pendingBlocks > lostPackets);
                     //leave one for the data buffer 
                     i64 freeBlocks = bufferBlockCapacity - 1 - cbufAccumulated;
                     i64 silenceBlocks = MAX(0, MIN(pendingBlocks - 1, freeBlocks));
+                    
                     if (pendingBlocks - 1 < lostPackets)
                     {
                         ASSERT(false && "Wrong pendingBlocks");
                     }
                     
                     //Silence blocks implied in this packet (J)
-                    //i64 silenceBlocks = pendingBlocks - lostPackets;
-                    
+                    //i64 actualSilenceBlocks = silenceBlocks - lostPackets;
+                    printf("(Lost packet) Seq. dif =%d, lost %ld packets. Pushing %ld silences in total.\n", seqDifference, lostPackets, silenceBlocks);
 
                     for (i64 i = 0; i < silenceBlocks; i++)
                     {                        
                         //We assume the lost blocks come first
                         if (i < lostPackets) {
                             verboseInfo("x");
+                            g_stats.lostPackets++;
                         } else {
                             verboseInfo("~");
+                            g_stats.silencesPlayed++;
                         }
 
                         if (!pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated)) {
-                            fprintf(stderr, "Circular buffer is full, dropping silences.\n");
+                            fprintf(stderr, "Circular buffer is full, dropping silence.\n");
                         }
                     }
 
@@ -590,13 +637,12 @@ int main(int argc, char** argv)
         } else {
             ASSERT(pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated)); //If the buffer is somehow full something has gone wrong
             //Increment input counters as if it arrived correctly 
+            g_stats.timeouts++;
             inputSequenceNum++;
             inputTimeStamp += samplesPerPacket;
             verboseInfo("t");
         }
     }
-    
-    
 
     /*
     *   Cleanup

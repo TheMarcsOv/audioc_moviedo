@@ -5,6 +5,7 @@
         "stdio.h": "c",
         "rtp.h": "c",
         "sysdep.h": "c",
-        "configuresndcard.h": "c"
+        "configuresndcard.h": "c",
+        "soundcard.h": "c"
     }
 }
