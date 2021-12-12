@@ -1,8 +1,8 @@
-/*
-*	AudioC - Marcos Oviedo Rodriguez - 100384018
-*	Para compilar el codigo ejecute:
-*   > gcc -Wall -Wextra -lm -std=gnu99 -g lib/*.c *.c -o audioc
-*/
+//
+//	AudioC - Marcos Oviedo Rodriguez - 100384018
+//	Para compilar el codigo ejecute:
+//  > gcc -Wall -Wextra -lm -std=gnu99 -g lib/*.c *.c -o audioc
+//
 
 #include <stdio.h>
 #include <signal.h>
