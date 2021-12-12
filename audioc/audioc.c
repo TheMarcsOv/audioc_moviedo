@@ -1,7 +1,7 @@
 //
 //	AudioC - Marcos Oviedo Rodriguez - 100384018
 //	Para compilar el codigo ejecute:
-//  > gcc -Wall -Wextra -lm -std=gnu99 -g lib/*.c *.c -o audioc
+//  > gcc -Wall -Wextra -lm -std=gnu99 -g lib/*.c audioc/*.c -o audioc
 //
 
 #include <stdio.h>
@@ -46,7 +46,9 @@ typedef struct {
 } statistics_t;
 
 static session_params_t sessionParams = {};
-static statistics_t g_stats = {};
+static statistics_t stats = {};
+static rtp_packet_t* packet;
+static void* circularBuffer;
 
 static void signalHandler(int sigNum)
 {
@@ -59,19 +61,19 @@ static void signalHandler(int sigNum)
 
     printf("Interrupted audioc\n");
 
-    printf("Played packets: %d\n", g_stats.packetsPlayed);
-    printf("Silent packets: %d\n", g_stats.lostPackets + g_stats.silencesPlayed + g_stats.timeouts);
-    printf("\tDue to detected silence (~): %d\n", g_stats.silencesPlayed);
-    printf("\tDue to packet loss (x): %d\n", g_stats.lostPackets);
-    printf("\tDue to timeouts (t): %d\n", g_stats.timeouts);
+    printf("Played packets: %d\n", stats.packetsPlayed);
+    printf("Silent packets: %d\n", stats.lostPackets + stats.silencesPlayed + stats.timeouts);
+    printf("\tDue to detected silence (~): %d\n", stats.silencesPlayed);
+    printf("\tDue to packet loss (x): %d\n", stats.lostPackets);
+    printf("\tDue to timeouts (t): %d\n", stats.timeouts);
 
-    if (g_stats.packetsPlayed > 0) {
+    if (stats.packetsPlayed > 0) {
         //in us
-        i64 start = g_stats.playbackStart.tv_usec + g_stats.playbackStart.tv_sec * 1000000;
+        i64 start = stats.playbackStart.tv_usec + stats.playbackStart.tv_sec * 1000000;
         i64 end = stopTime.tv_usec + stopTime.tv_sec * 1000000;
 
         i64 diff = end - start;
-        double theoreticalPlayback = g_stats.packetsPlayed * sessionParams.fragmentBytes / 
+        double theoreticalPlayback = stats.packetsPlayed * sessionParams.fragmentBytes / 
             (double)(sessionParams.bytesPerSample * sessionParams.sampleRate);
         
         printf("Total playback time (theoretical): %f seconds.\n", theoreticalPlayback);
@@ -80,9 +82,12 @@ static void signalHandler(int sigNum)
         printf("No audio was played.\n");
     }
     
-    printf("Recorded (and sent) packets: %d\n", g_stats.packetsRecorded);
+    printf("Recorded (and sent) packets: %d\n", stats.packetsRecorded);
 
-    
+    //Free buffers
+    free(packet);
+    cbuf_destroy_buffer(circularBuffer);
+
     exit(0);
 }
 
@@ -257,7 +262,7 @@ int main(int argc, char** argv)
 
     trace("Num. blocks in cbuf: %d, buffer block threshold: %d\n", bufferBlockCapacity, bufferingBlocks);
     
-    void* circularBuffer = cbuf_create_buffer(bufferBlockCapacity, requestedFragmentSize);
+    circularBuffer = cbuf_create_buffer(bufferBlockCapacity, requestedFragmentSize);
 
     /*
     *   Multicast socket configuration
@@ -299,7 +304,7 @@ int main(int argc, char** argv)
     usize expectedPacketSize = sessionParams.fragmentBytes + sizeof(rtp_hdr_t);
     const usize samplesPerPacket = sessionParams.fragmentBytes / sessionParams.bytesPerSample;
     trace("Samples per packet: %d\n", samplesPerPacket);
-    rtp_packet_t* packet = (rtp_packet_t*) malloc(expectedPacketSize);
+    packet = (rtp_packet_t*) malloc(expectedPacketSize);
     struct timeval timeout;
     fd_set readSet, writeSet;
 
@@ -356,7 +361,7 @@ int main(int argc, char** argv)
                 outputSequenceNum += 1;
                 outputTimeStamp += samplesPerPacket;
 
-                g_stats.packetsRecorded++;
+                stats.packetsRecorded++;
             }
             if (FD_ISSET(sockId, &readSet)) {
                 isize result;
@@ -491,13 +496,13 @@ int main(int argc, char** argv)
                             n, sessionParams.fragmentBytes);
                     }
 
-                    if (g_stats.packetsPlayed == 0) {
-                        if(gettimeofday(&g_stats.playbackStart, NULL) != 0) {
+                    if (stats.packetsPlayed == 0) {
+                        if(gettimeofday(&stats.playbackStart, NULL) != 0) {
                             panic("Could not get current time from gettimeofday()!");
                         }
                     }
 
-                    g_stats.packetsPlayed++;
+                    stats.packetsPlayed++;
                     verboseInfo("-");
                     cbufAccumulated--;
                 } else {
@@ -519,7 +524,7 @@ int main(int argc, char** argv)
                 outputSequenceNum += 1;
                 outputTimeStamp += samplesPerPacket;
 
-                g_stats.packetsRecorded++;
+                stats.packetsRecorded++;
             }
             if (FD_ISSET(sockId, &readSet)) {
                 
@@ -574,7 +579,7 @@ int main(int argc, char** argv)
                             if (!pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated)) {
                                 fprintf(stderr, "Circular buffer is full, dropping silences.\n");
                             } 
-                            g_stats.silencesPlayed++;
+                            stats.silencesPlayed++;
                             verboseInfo("~");
                         }
                     }                    
@@ -604,10 +609,10 @@ int main(int argc, char** argv)
                         //We assume the lost blocks come first
                         if (i < lostPackets) {
                             verboseInfo("x");
-                            g_stats.lostPackets++;
+                            stats.lostPackets++;
                         } else {
                             verboseInfo("~");
-                            g_stats.silencesPlayed++;
+                            stats.silencesPlayed++;
                         }
 
                         if (!pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated)) {
@@ -646,7 +651,7 @@ int main(int argc, char** argv)
                 fprintf(stderr, "Circular buffer is full, dropping silence.\n");
             }
             //Increment input counters as if it arrived correctly 
-            g_stats.timeouts++;
+            stats.timeouts++;
             inputSequenceNum++;
             inputTimeStamp += samplesPerPacket;
             verboseInfo("t");
