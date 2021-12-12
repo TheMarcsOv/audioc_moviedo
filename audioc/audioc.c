@@ -436,7 +436,7 @@ int main(int argc, char** argv)
         //  T = remaining in sound card (ms) + remaining in buffer (ms) - 10 ms
         float timeInBuffer = cbufAccumulated * samplesPerPacket * 1000.f / (float)rate; //ms
         float timeInCard = (bytesInCard / bytesPerSample) * 1000.f / (float)rate; //ms
-        float remainingTime = MAX(timeInBuffer + timeInCard - 5.f, 0.f); //ms 10.f
+        float remainingTime = MAX(timeInBuffer + timeInCard - 10.f, 1.f); //ms 10.f
         i64 remUSecs = (i64) (remainingTime * 1000.f) + 1; //us
 
         timeout.tv_sec = 0;
