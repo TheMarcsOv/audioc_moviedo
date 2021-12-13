@@ -447,7 +447,7 @@ int main(int argc, char** argv)
         //  T = remaining in sound card (ms) + remaining in buffer (ms) - 10 ms
         float timeInBuffer = cbufAccumulated * samplesPerPacket * 1000.f / (float)rate; //ms
         float timeInCard = (bytesInCard / bytesPerSample) * 1000.f / (float)rate; //ms
-        float remainingTime = MAX(timeInBuffer + timeInCard - 10.f, 0.1f); //ms
+        float remainingTime = MAX(timeInBuffer + timeInCard - 10.f, 0.0f); //ms
         i64 remUSecs = (i64) (remainingTime * 1000.f); //us
 
         timeout.tv_sec = 0;
@@ -560,8 +560,8 @@ int main(int argc, char** argv)
                     //Received previous samples, ignore
                     //Either last packet was smaller than samplesPerPacket or
                     //this is a retransmission? ignore
-                    //printf("Re-TX: current(seq=%d, ts=%d), recv(seq=%d, ts=%d)\n", 
-                    //    inputSequenceNum, inputTimeStamp, header->seq, header->ts);
+                    printf("Re-TX: current(seq=%d, ts=%d), recv(seq=%d, ts=%d)\n", 
+                        inputSequenceNum, inputTimeStamp, header->seq, header->ts);
                     discard = true;
                 }else if (seqDifference == 1) {
                     //Packet received as expected
@@ -652,7 +652,7 @@ int main(int argc, char** argv)
             }
             //Increment input counters as if it arrived correctly 
             stats.timeouts++;
-            inputSequenceNum++;
+            //inputSequenceNum++;
             inputTimeStamp += samplesPerPacket;
             verboseInfo("t");
         }
