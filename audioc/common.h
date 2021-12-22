@@ -36,6 +36,9 @@ typedef __ssize_t isize;
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
+//Only use this with static arrays!!
+#define ARRAY_COUNT(array) (sizeof((array))/sizeof((array)[0]))
+
 #ifdef AC_ASSERTS
 #define ASSERT(X) assert(X)
 #else

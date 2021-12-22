@@ -142,13 +142,28 @@ static bool validateRTPHeader(rtp_hdr_t* header, session_params_t sessionParams)
     return true;
 }
 
-static bool pushSilence(void* cbuf, usize fragmentSize, isize *outCbufCount)
+static bool pushSilence(void* cbuf, usize fragmentSize, isize *outCbufCount, payload_t payload)
 {
-    void* bufferBlock = cbuf_pointer_to_write(cbuf);
+    u8* bufferBlock = (u8*)cbuf_pointer_to_write(cbuf);
     if (bufferBlock) {
-        //TODO: Generate white noise instead
-        //Advanced: interpolate previous audio?
-        memset(bufferBlock, 0, fragmentSize);
+        usize blockSize;
+        u8* silenceArray;
+        if (payload == PCMU) {
+            blockSize = ARRAY_COUNT(silenceMU8);
+            silenceArray = silenceMU8;
+        } else {
+            blockSize = ARRAY_COUNT(silenceL16BE);
+            silenceArray = silenceL16BE;
+        }
+        usize fullCopies = fragmentSize / blockSize;
+        usize partialCopy = fragmentSize % blockSize;
+        for (usize i = 0; i < fullCopies; i++)
+        {
+            memcpy(bufferBlock, silenceArray, blockSize);
+            bufferBlock += blockSize;
+        }
+        memcpy(bufferBlock, silenceArray, partialCopy);
+        //memset(bufferBlock, 0, fragmentSize);
         *outCbufCount = (*outCbufCount) + 1;
         return true;
     }
@@ -573,10 +588,10 @@ int main(int argc, char** argv)
                         ASSERT(numBlocks > 1);
                         i64 freeBlocks = bufferBlockCapacity - cbufAccumulated;
                         i64 numSilenceBlocks = MIN(numBlocks - 1, freeBlocks);
-                        printf("(Silence packet) Pushing %ld silences.\n", numSilenceBlocks);
+                        //printf("(Silence packet) Pushing %ld silences.\n", numSilenceBlocks);
                         for (i64 i = 0; i < numSilenceBlocks; i++)
                         {
-                            if (!pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated)) {
+                            if (!pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated, sessionParams.pt)) {
                                 fprintf(stderr, "Circular buffer is full, dropping silences.\n");
                             } 
                             stats.silencesPlayed++;
@@ -615,7 +630,7 @@ int main(int argc, char** argv)
                             stats.silencesPlayed++;
                         }
 
-                        if (!pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated)) {
+                        if (!pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated, sessionParams.pt)) {
                             fprintf(stderr, "Circular buffer is full, dropping silence.\n");
                         }
                     }
@@ -645,7 +660,7 @@ int main(int argc, char** argv)
                 }
             }
         } else {
-            bool success = pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated);
+            bool success = pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated, sessionParams.pt);
             //If the buffer is somehow full something has gone wrong
             if (!success){
                 fprintf(stderr, "Circular buffer is full, dropping silence.\n");
