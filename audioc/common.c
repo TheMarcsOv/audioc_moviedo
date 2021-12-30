@@ -15,7 +15,7 @@ void verboseInfo(const char* fmt, ...)
     if (DEBUG_TRACES_ENABLED) {
         va_list list;
         va_start(list, fmt);
-        vfprintf(stderr, fmt, list);
+        vfprintf(stdout, fmt, list);
         va_end(list);
         fflush(stdout); 
     }
