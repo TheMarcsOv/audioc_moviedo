@@ -575,7 +575,7 @@ int main(int argc, char** argv)
                     //Received previous samples, ignore
                     //Either last packet was smaller than samplesPerPacket or
                     //this is a retransmission? ignore
-                    printf("Re-TX: current(seq=%d, ts=%d), recv(seq=%d, ts=%d)\n", 
+                    trace("Re-TX: current(seq=%d, ts=%d), recv(seq=%d, ts=%d)\n", 
                         inputSequenceNum, inputTimeStamp, header->seq, header->ts);
                     discard = true;
                 }else if (seqDifference == 1) {
@@ -592,7 +592,7 @@ int main(int argc, char** argv)
                         for (i64 i = 0; i < numSilenceBlocks; i++)
                         {
                             if (!pushSilence(circularBuffer, sessionParams.fragmentBytes, &cbufAccumulated, sessionParams.pt)) {
-                                fprintf(stderr, "Circular buffer is full, dropping silences.\n");
+                                trace("Circular buffer is full, dropping silences.\n");
                             } 
                             stats.silencesPlayed++;
                             verboseInfo("~");
@@ -609,11 +609,7 @@ int main(int argc, char** argv)
                     //leave one for the data buffer 
                     i64 freeBlocks = bufferBlockCapacity - 1 - cbufAccumulated;
                     i64 silenceBlocks = MAX(0, MIN(pendingBlocks - 1, freeBlocks));
-                    
-                    if (pendingBlocks - 1 < lostPackets)
-                    {
-                        ASSERT(false && "Wrong pendingBlocks");
-                    }
+                    ASSERT((pendingBlocks - 1 >= lostPackets) && "Wrong pendingBlocks");
                     
                     //Silence blocks implied in this packet (J)
                     //i64 actualSilenceBlocks = silenceBlocks - lostPackets;
