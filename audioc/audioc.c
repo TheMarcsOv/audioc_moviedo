@@ -667,7 +667,7 @@ int main(int argc, char** argv)
             }
             //Increment input counters as if it arrived correctly 
             stats.timeouts++;
-            //inputSequenceNum++;
+            //silences do not increment the sequence number
             inputTimeStamp += samplesPerPacket;
             verboseInfo("t");
         }

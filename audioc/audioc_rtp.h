@@ -16,7 +16,7 @@ void ntohRTP(rtp_hdr_t* header);
 void htonRTP(rtp_hdr_t* header);
 
 extern u8 silenceMU8[256];
-extern u8 silenceL16BE[256];
+extern u8 silenceL16BE[512];
 
 //Safely calculate the difference between sequence numbers taking wrapping into account
 inline static i32 seqNumDifference(u16 from, u16 to)
