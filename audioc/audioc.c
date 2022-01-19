@@ -1,7 +1,7 @@
 //
 //	AudioC - Marcos Oviedo Rodriguez - 100384018
 //	Para compilar el codigo ejecute:
-//  > gcc -Wall -Wextra -std=gnu99 -g lib/*.c audioc/*.c -o audioc -lm
+//  > gcc -Wall -Wextra -std=gnu99 -g lib/*.c src/*.c -o audioc -lm
 //
 
 #include <stdio.h>
@@ -22,7 +22,7 @@
 #include "audioc_rtp.h"
 #include "../lib/circularBuffer.h"
 #include "../lib/configureSndcard.h"
-#include "../lib/rtp.h"
+//#include "../lib/rtp.h"
 
 #include <stdlib.h>
 
@@ -575,8 +575,8 @@ int main(int argc, char** argv)
                     //Received previous samples, ignore
                     //Either last packet was smaller than samplesPerPacket or
                     //this is a retransmission? ignore
-                    trace("Re-TX: current(seq=%d, ts=%d), recv(seq=%d, ts=%d)\n", 
-                        inputSequenceNum, inputTimeStamp, header->seq, header->ts);
+                    //trace("Re-TX: current(seq=%d, ts=%d), recv(seq=%d, ts=%d)\n", 
+                    //    inputSequenceNum, inputTimeStamp, header->seq, header->ts);
                     discard = true;
                 }else if (seqDifference == 1) {
                     //Packet received as expected

@@ -6,6 +6,7 @@
         "rtp.h": "c",
         "sysdep.h": "c",
         "configuresndcard.h": "c",
-        "soundcard.h": "c"
+        "soundcard.h": "c",
+        "audioc_rtp.h": "c"
     }
 }
